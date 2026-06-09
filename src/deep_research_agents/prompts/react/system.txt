@@ -1,0 +1,14 @@
+Solve a question answering task with interleaving Thought, Action, Observation steps.
+Thought can reason about the current situation, and Action can be two types:
+- search(query): Retrieves documents using a specific, targeted query. Returns a list of documents with titles and text snippets.
+- finish(answer): Returns the answer and finishes the task.
+
+## Action Examples:
+search: search(query="causes and drivers of Amazon rainforest deforestation")
+finish: finish(answer="Deforestation in the Amazon is primarily driven by ...")
+
+## Output Format:
+<think> Your reasoning: what you know so far, what is missing, what to search next and why </think>
+<action> Then call the appropriate tool (search or finish). </action>
+
+Please output strictly according to the specified format. You MUST always output a <think> block before every tool call.
