@@ -20,7 +20,6 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
-from agentic_retrieval_research.utils.s3_utils import is_s3_path, s3_open, s3_makedirs
 
 logger = logging.getLogger(__name__)
 
@@ -177,18 +176,16 @@ class GenerationEvaluator:
             output_dir: Directory where files will be written.
         """
         output_dir_str = str(output_dir)
-        s3_makedirs(output_dir_str)
+        Path(output_dir_str).mkdir(parents=True, exist_ok=True)
         generation = result.get("generation", "")
 
         # Save raw markdown
         md_path = f"{output_dir_str.rstrip('/')}/{query_id}.md"
-        with s3_open(md_path, "w") as f:
+        with open(md_path, "w") as f:
             f.write(generation)
 
     def save_results(self, metrics: Dict[str, Any], output_path) -> None:
         """Save generation metrics to a JSON file.
-
-        Supports both local paths and S3 URIs.
 
         Args:
             metrics:     Output of :meth:`evaluate`.
@@ -197,12 +194,8 @@ class GenerationEvaluator:
         if not metrics:
             return
         output_path_str = str(output_path)
-        if is_s3_path(output_path_str):
-            from agentic_retrieval_research.utils.s3_utils import s3_write_text
-            s3_write_text(output_path_str, json.dumps(metrics, indent=2, default=str))
-        else:
-            output_path = Path(output_path)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(output_path, "w", encoding="utf-8") as f:
-                json.dump(metrics, f, indent=2, default=str)
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(metrics, f, indent=2, default=str)
         print(f"  ✓ Saved generation metrics: {output_path_str}")

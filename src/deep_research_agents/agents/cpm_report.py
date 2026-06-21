@@ -22,10 +22,10 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from jinja2 import Template
 
-from agentic_retrieval_research.searcher_component.fusion import interleaving_fusion
+from searcher_component.fusion import interleaving_fusion
 from agents.base_agent import BasicAgent
-from agent_tools.trajectory_tracker import TrackerCriticalThinkResult, TrackerEarlyStopResult
-from utils.inference_config import InferenceConfig
+from controller_component import TrackerCriticalThinkResult, TrackerEarlyStopResult
+from utils.config import InferenceConfig
 
 logger = logging.getLogger(__name__)
 

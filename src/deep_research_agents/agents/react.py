@@ -12,7 +12,7 @@ from typing import List, Optional, Dict, Any, Tuple
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
-from agentic_retrieval_research.llm_utils.litellm_client import LiteLLMClient
+from utils.llm_client import LiteLLMClient
 
 _PROMPT_DIR = Path(__file__).parent.parent / "prompts" / "react"
 REACT_SYSTEM_PROMPT = (_PROMPT_DIR / "system.txt").read_text()
@@ -22,11 +22,11 @@ logger = logging.getLogger(__name__)
 
 from .base_agent import BasicAgent
 from agent_tools.react_tools import PlanTool
-from agent_tools.trajectory_tracker import TrackerCriticalThinkResult, TrackerEarlyStopResult
-from prompts.trajectory_tracker.answer_prompts import FINAL_ANSWER_INSTRUCTION, REACT_FORMAT
-from utils.doc_formatting import passages2string
-from utils.inference_config import InferenceConfig
-from utils.parsing import get_action, parse_action_call, extract_think_and_clean
+from controller_component import TrackerCriticalThinkResult, TrackerEarlyStopResult
+from controller_component.prompts.answer_prompts import FINAL_ANSWER_INSTRUCTION, REACT_FORMAT
+from utils.text_utils import passages2string
+from utils.config import InferenceConfig
+from utils.text_utils import get_action, parse_action_call, extract_think_and_clean
 
 
 class ReActAgent(BasicAgent):

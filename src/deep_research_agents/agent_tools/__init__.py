@@ -3,20 +3,20 @@ from .google_search import GoogleSearchTool
 from .browse_webpage import BrowseWebpageTool
 from .react_tools import PlanTool
 
-from .trajectory_tracker import (
+from controller_component import (
     TrackerCriticalThinkDeferred, TrackerCriticalThinkResult, TrackerEarlyStopResult,
-    encode_fn_from_retriever, AspectCoverageSignal,
-    LLMDecisionMaker,
+    encode_fn_from_retriever, CriteriaCoverageSignal,
+    LLMControllerPolicy,
     LLMCriticalThinkingGenerator, LLMAnswerCandidateGenerator, ResponsesAPICandidateGenerator,
-    TrajectoryTracker,
+    Controller,
 )
 
 __all__ = [
     "SnippetSearchTool", "GoogleSearchTool", "BrowseWebpageTool",
     "PlanTool",
-    "TrajectoryTracker", "LLMCriticalThinkingGenerator",
+    "Controller", "LLMCriticalThinkingGenerator",
     "TrackerCriticalThinkDeferred", "TrackerCriticalThinkResult", "TrackerEarlyStopResult",
-    "encode_fn_from_retriever", "LLMDecisionMaker",
+    "encode_fn_from_retriever", "LLMControllerPolicy",
     "LLMAnswerCandidateGenerator", "ResponsesAPICandidateGenerator",
-    "AspectCoverageSignal",
+    "CriteriaCoverageSignal",
 ]

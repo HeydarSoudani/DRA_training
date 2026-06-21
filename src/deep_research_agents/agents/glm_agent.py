@@ -22,14 +22,14 @@ import openai
 
 from .base_agent import BasicAgent
 from prompts.glm.user import QUERY_TEMPLATE
-from prompts.trajectory_tracker.answer_prompts import (
+from controller_component.prompts.answer_prompts import (
     CANDIDATE_GENERATION_INSTRUCTION,
     FINAL_ANSWER_INSTRUCTION,
     OSS_FORMAT,
     AnswerCandidateOutput,
     extract_answer_candidates,
 )
-from utils.inference_config import InferenceConfig
+from utils.config import InferenceConfig
 
 logger = logging.getLogger(__name__)
 

@@ -22,8 +22,8 @@ Configurable inputs (retrieval_input / post_fusion_reranker_input):
 import logging
 from typing import Any, Dict, List, Optional, Union
 
-from agentic_retrieval_research.searcher_component.fusion import fuse_results
-from agentic_retrieval_research.searcher_component import normalize_retrieval_response
+from searcher_component.fusion import fuse_results
+from searcher_component import normalize_retrieval_response
 
 logger = logging.getLogger(__name__)
 

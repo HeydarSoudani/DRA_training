@@ -7,7 +7,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from agentic_retrieval_research.llm_utils.litellm_client import LiteLLMClient
+from utils.llm_client import LiteLLMClient
 from prompts.searchr1.user_prompt import PROMPT_SEARCHR1
 
 from .base_agent import TagReasoningAgent

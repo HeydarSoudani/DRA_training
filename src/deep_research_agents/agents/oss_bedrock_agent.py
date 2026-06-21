@@ -17,8 +17,8 @@ import litellm
 
 from .base_agent import BasicAgent, _strip_tool_messages
 from prompts.oss.user import QUERY_TEMPLATE
-from prompts.trajectory_tracker.answer_prompts import FINAL_ANSWER_INSTRUCTION, OSS_FORMAT
-from utils.inference_config import InferenceConfig
+from controller_component.prompts.answer_prompts import FINAL_ANSWER_INSTRUCTION, OSS_FORMAT
+from utils.config import InferenceConfig
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ class OSS_BedrockAgent(BasicAgent):
         )
 
     def get_answer_candidate_llm(self):
-        from agentic_retrieval_research.llm_utils.litellm_client import LiteLLMClient
+        from utils.llm_client import LiteLLMClient
         return LiteLLMClient(model=self.model_name, aws_region_name=self._aws_region)
 
     # _get_tool_definitions() and _format_search_results() inherited from BasicAgent

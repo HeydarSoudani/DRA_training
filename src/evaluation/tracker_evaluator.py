@@ -1,6 +1,6 @@
-"""Tracker evaluator: persist and aggregate trajectory-tracker signals.
+"""Tracker evaluator: persist and aggregate controller signals.
 
-Saves the per-iteration signal data produced by ``TrajectoryTracker``
+Saves the per-iteration signal data produced by ``Controller``
 into lightweight JSON files (one per query) under a dedicated ``tracker/``
 output directory.  These files are designed for direct consumption by the
 analysis code (correlation, plotting) without needing to recompute signals.
@@ -26,8 +26,8 @@ Per-query JSON schema::
                 "answer_candidates": [
                     {"candidate": "some answer", "reasoning": "reasoning text", "confidence": 75.0}
                 ],
-                "aspect_coverage": {
-                    "aspects": [{"name": "...", "status": "covered", "evidence": "..."}],
+                "criteria_coverage": {
+                    "criteria": [{"name": "...", "status": "covered", "evidence": "..."}],
                     "num_covered": 1, "num_partial": 0, "num_not_covered": 2,
                     "total": 3, "critical_gaps": ["..."], "minor_gaps": [],
                     ...
@@ -50,13 +50,12 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from agentic_retrieval_research.utils.s3_utils import is_s3_path, s3_open, s3_makedirs
 
 logger = logging.getLogger(__name__)
 
 
 class TrackerEvaluator:
-    """Persist and aggregate trajectory-tracker signal data.
+    """Persist and aggregate controller signal data.
 
     Usage::
 
@@ -100,7 +99,7 @@ class TrackerEvaluator:
             return
 
         output_dir_str = str(output_dir)
-        s3_makedirs(output_dir_str)
+        Path(output_dir_str).mkdir(parents=True, exist_ok=True)
 
         per_iteration: Dict[str, Any] = {}
         for idx, scores in enumerate(score_history):
@@ -117,10 +116,10 @@ class TrackerEvaluator:
                 "num_repeated_relevant": scores.get("num_repeated_relevant"),
                 "num_irrelevant": scores.get("num_irrelevant"),
                 "num_docs_this_step": scores.get("num_docs_this_step"),
-                "dm_action": scores.get("dm_action"),
-                "dm_reasoning": scores.get("dm_reasoning"),
+                "controller_action": scores.get("controller_action"),
+                "controller_reasoning": scores.get("controller_reasoning"),
                 "answer_candidates": scores.get("answer_candidates", []),
-                "aspect_coverage": scores.get("aspect_coverage"),
+                "criteria_coverage": scores.get("criteria_coverage"),
             }
             per_iteration[iter_key] = entry
 
@@ -134,7 +133,7 @@ class TrackerEvaluator:
         }
 
         json_path = f"{output_dir_str.rstrip('/')}/{query_id}.json"
-        with s3_open(json_path, "w") as f:
+        with open(json_path, "w") as f:
             json.dump(item, f, indent=2, default=str)
 
     # ------------------------------------------------------------------

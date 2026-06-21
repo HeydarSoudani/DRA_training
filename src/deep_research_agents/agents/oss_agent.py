@@ -18,8 +18,8 @@ from pathlib import Path
 
 from .base_agent import BasicAgent
 from prompts.oss.user import QUERY_TEMPLATE
-from prompts.trajectory_tracker.answer_prompts import FINAL_ANSWER_INSTRUCTION, OSS_FORMAT
-from utils.inference_config import InferenceConfig
+from controller_component.prompts.answer_prompts import FINAL_ANSWER_INSTRUCTION, OSS_FORMAT
+from utils.config import InferenceConfig
 
 logger = logging.getLogger(__name__)
 

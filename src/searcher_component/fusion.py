@@ -1,6 +1,6 @@
 """Compatibility shim — function-based fusion API backed by the new fusion classes.
 
-The fusion logic lives in the agentic_retrieval_research.fusion package (class-based).
+The fusion logic lives in the searcher_component.fusion_methods package (class-based).
 This module re-exports the same function-level interface so that existing callers
 (searcher_component/__init__.py, parallel_dm_agent.py, retrieval_evaluator.py, etc.)
 continue to work without modification.
@@ -8,9 +8,9 @@ continue to work without modification.
 
 from typing import Any, Dict, List, Optional
 
-from agentic_retrieval_research.fusion.interleaving import InterleavingFusion, NestedInterleavingFusion
-from agentic_retrieval_research.fusion.rrf import ReciprocalRankFusion
-from agentic_retrieval_research.fusion.concatenation import SimpleConcatenation
+from searcher_component.fusion_methods.interleaving import InterleavingFusion, NestedInterleavingFusion
+from searcher_component.fusion_methods.rrf import ReciprocalRankFusion
+from searcher_component.fusion_methods.concatenation import SimpleConcatenation
 
 
 # ---------------------------------------------------------------------------

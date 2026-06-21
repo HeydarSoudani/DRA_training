@@ -23,7 +23,6 @@ from transformers import AutoTokenizer, AutoModel, AutoModelForMaskedLM
 from transformers import DPRQuestionEncoder, DPRQuestionEncoderTokenizerFast
 
 # Import S3 utilities
-from agentic_retrieval_research.utils.s3_utils import is_s3_path, get_s3_fs
 
 
 MODEL2PATH = {
@@ -174,54 +173,39 @@ def load_corpus(corpus_path: str):
         "
 
     Args:
-        corpus_path: Path to corpus file (can be local or S3 path like 's3://bucket/key')
+        corpus_path: Path to corpus file
 
     Returns:
         HuggingFace Dataset object
     """
-    if is_s3_path(corpus_path):
-        # For S3 paths, use s3fs with datasets
-        # The datasets library can work with s3fs for remote files
-        import s3fs
-        fs = get_s3_fs()
+    import os
+    # Check for pre-built Arrow cache next to the corpus file.
+    # Supports two naming conventions:
+    #   1. arrow_cache_<stem>  (per-file, e.g. arrow_cache_corpus_en_news)
+    #   2. arrow_cache         (legacy single-corpus layout)
+    corpus_dir = os.path.dirname(corpus_path)
+    stem = os.path.splitext(os.path.basename(corpus_path))[0]
+    arrow_cache_per_file = os.path.join(corpus_dir, f"arrow_cache_{stem}")
+    arrow_cache_legacy = os.path.join(corpus_dir, "arrow_cache")
+    if os.path.isdir(arrow_cache_per_file):
+        arrow_cache = arrow_cache_per_file
+    elif os.path.isdir(arrow_cache_legacy):
+        arrow_cache = arrow_cache_legacy
+    else:
+        arrow_cache = None
 
-        # datasets.load_dataset can work with s3fs by passing a file-like object
-        # or by using the path directly if s3fs is configured
+    if arrow_cache:
+        print(f"Loading corpus from Arrow cache (memory-mapped): {arrow_cache}")
+        corpus = datasets.load_from_disk(arrow_cache)
+    else:
+        suggested = arrow_cache_per_file
+        print(f"Loading corpus from JSONL (slow for large corpora). "
+              f"Run save_to_disk('{suggested}') once to build a fast Arrow cache.")
         corpus = datasets.load_dataset(
             'json',
             data_files=corpus_path,
-            split="train",
-            storage_options={'anon': False}  # Use AWS credentials
+            split="train"
         )
-    else:
-        import os
-        # Check for pre-built Arrow cache next to the corpus file.
-        # Supports two naming conventions:
-        #   1. arrow_cache_<stem>  (per-file, e.g. arrow_cache_corpus_en_news)
-        #   2. arrow_cache         (legacy single-corpus layout)
-        corpus_dir = os.path.dirname(corpus_path)
-        stem = os.path.splitext(os.path.basename(corpus_path))[0]
-        arrow_cache_per_file = os.path.join(corpus_dir, f"arrow_cache_{stem}")
-        arrow_cache_legacy = os.path.join(corpus_dir, "arrow_cache")
-        if os.path.isdir(arrow_cache_per_file):
-            arrow_cache = arrow_cache_per_file
-        elif os.path.isdir(arrow_cache_legacy):
-            arrow_cache = arrow_cache_legacy
-        else:
-            arrow_cache = None
-
-        if arrow_cache:
-            print(f"Loading corpus from Arrow cache (memory-mapped): {arrow_cache}")
-            corpus = datasets.load_from_disk(arrow_cache)
-        else:
-            suggested = arrow_cache_per_file
-            print(f"Loading corpus from JSONL (slow for large corpora). "
-                  f"Run save_to_disk('{suggested}') once to build a fast Arrow cache.")
-            corpus = datasets.load_dataset(
-                'json',
-                data_files=corpus_path,
-                split="train"
-            )
     return corpus
 
 def load_or_build_id2idx(corpus, corpus_path, desc="Building id2idx mapping"):
@@ -240,18 +224,9 @@ def load_or_build_id2idx(corpus, corpus_path, desc="Building id2idx mapping"):
     import os
     import pickle
 
-    # Determine cache file path
-    if is_s3_path(corpus_path):
-        # For S3 paths, use a local cache directory
-        cache_dir = os.path.expanduser("~/.cache/agentic_retrieval")
-        os.makedirs(cache_dir, exist_ok=True)
-        # Create a filename based on the S3 path
-        cache_filename = corpus_path.replace("s3://", "").replace("/", "_") + "_id2idx.pkl"
-        cache_path = os.path.join(cache_dir, cache_filename)
-    else:
-        # For local paths, put cache next to corpus file
-        corpus_dir = os.path.dirname(corpus_path)
-        cache_path = os.path.join(corpus_dir, "id2idx_cache.pkl")
+    # Determine cache file path: put cache next to corpus file
+    corpus_dir = os.path.dirname(corpus_path)
+    cache_path = os.path.join(corpus_dir, "id2idx_cache.pkl")
 
     # Try to load from cache
     if os.path.exists(cache_path):

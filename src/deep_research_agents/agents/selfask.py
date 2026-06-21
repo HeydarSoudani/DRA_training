@@ -10,7 +10,7 @@ from typing import Dict, List, Any, Optional
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from agentic_retrieval_research.llm_utils.litellm_client import LiteLLMClient
+from utils.llm_client import LiteLLMClient
 
 _PROMPT_DIR = Path(__file__).parent.parent / "prompts" / "selfask"
 SELF_ASK_PROMPT_MULTI_HOP = (_PROMPT_DIR / "system.txt").read_text()
@@ -18,8 +18,8 @@ SELF_ASK_PROMPT_MULTI_HOP = (_PROMPT_DIR / "system.txt").read_text()
 from prompts.selfask.user_prompt import USER_PROMPT as _SELFASK_USER_PROMPT
 
 from .base_agent import BasicAgent
-from agent_tools.trajectory_tracker import TrackerCriticalThinkResult, TrackerEarlyStopResult
-from prompts.trajectory_tracker.answer_prompts import FINAL_ANSWER_INSTRUCTION, SELFASK_FORMAT
+from controller_component import TrackerCriticalThinkResult, TrackerEarlyStopResult
+from controller_component.prompts.answer_prompts import FINAL_ANSWER_INSTRUCTION, SELFASK_FORMAT
 
 logger = logging.getLogger(__name__)
 

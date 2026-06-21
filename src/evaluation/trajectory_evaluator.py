@@ -36,7 +36,6 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from agentic_retrieval_research.utils.s3_utils import is_s3_path, s3_open, s3_makedirs
 
 logger = logging.getLogger(__name__)
 
@@ -324,7 +323,7 @@ class TrajectoryEvaluator:
             output_dir: Directory where ``{query_id}.json`` will be written.
         """
         output_dir_str = str(output_dir)
-        s3_makedirs(output_dir_str)
+        Path(output_dir_str).mkdir(parents=True, exist_ok=True)
         item: Dict[str, Any] = {
             "qid": query_id,
             "question": question,
@@ -351,13 +350,11 @@ class TrajectoryEvaluator:
         item["trajectory"] = _clean_trajectory_for_save(item["trajectory"])
 
         json_path = f"{output_dir_str.rstrip('/')}/{query_id}.json"
-        with s3_open(json_path, "w") as f:
+        with open(json_path, "w") as f:
             json.dump(item, f, indent=2, default=str)
 
     def save_results(self, metrics: Dict[str, Any], output_path, summary: Optional[Dict[str, Any]] = None, summary_path=None) -> None:
         """Save trajectory statistics and optionally the run summary to JSON files.
-
-        Supports both local paths and S3 URIs.
 
         Args:
             metrics:      Output of :meth:`evaluate`.
@@ -368,24 +365,16 @@ class TrajectoryEvaluator:
         if not metrics:
             return
         output_path_str = str(output_path)
-        if is_s3_path(output_path_str):
-            from agentic_retrieval_research.utils.s3_utils import s3_write_text
-            s3_write_text(output_path_str, json.dumps(metrics, indent=2, default=str))
-        else:
-            output_path = Path(output_path)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(output_path, "w", encoding="utf-8") as f:
-                json.dump(metrics, f, indent=2, default=str)
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(metrics, f, indent=2, default=str)
         print(f"  ✓ Saved trajectory metrics: {output_path_str}")
 
         if summary and summary_path:
             summary_path_str = str(summary_path)
-            if is_s3_path(summary_path_str):
-                from agentic_retrieval_research.utils.s3_utils import s3_write_text
-                s3_write_text(summary_path_str, json.dumps(summary, indent=2, default=str))
-            else:
-                summary_path = Path(summary_path)
-                summary_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(summary_path, "w", encoding="utf-8") as f:
-                    json.dump(summary, f, indent=2, default=str)
+            summary_path = Path(summary_path)
+            summary_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(summary_path, "w", encoding="utf-8") as f:
+                json.dump(summary, f, indent=2, default=str)
             print(f"  ✓ Saved summary: {summary_path_str}")

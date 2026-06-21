@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from agentic_retrieval_research.llm_utils.litellm_client import LiteLLMClient
+from utils.llm_client import LiteLLMClient
 from prompts.searcho1.prompts import (
     get_multiqa_search_o1_instruction,
     get_task_instruction_openqa,
@@ -18,8 +18,8 @@ from prompts.searcho1.prompts import (
 )
 
 from .base_agent import BasicAgent, passages2string
-from agent_tools.trajectory_tracker import TrackerCriticalThinkResult, TrackerEarlyStopResult
-from prompts.trajectory_tracker.answer_prompts import FINAL_ANSWER_INSTRUCTION, BOXED_FORMAT
+from controller_component import TrackerCriticalThinkResult, TrackerEarlyStopResult
+from controller_component.prompts.answer_prompts import FINAL_ANSWER_INSTRUCTION, BOXED_FORMAT
 
 logger = logging.getLogger(__name__)
 

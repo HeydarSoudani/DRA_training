@@ -13,10 +13,9 @@ import pytrec_eval
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
-from agentic_retrieval_research.utils.s3_utils import is_s3_path, s3_open, s3_makedirs
 
-from ..corpus_dataset.ranking_results import RankingResults, RankingResult, save_ranking_results
-from ..searcher_component.fusion import fuse_retrieval_results
+from indexing_corpus_dataset.ranking_results import RankingResults, RankingResult, save_ranking_results
+from searcher_component.fusion import fuse_retrieval_results
 from .efficiency_tracker import EfficiencyTracker
 
 logger = logging.getLogger(__name__)
@@ -317,36 +316,27 @@ def save_results(
         llm_outputs: Optional list of LLM outputs per query
     """
     output_dir_str = str(output_dir)
-    _is_s3 = is_s3_path(output_dir_str)
-
-    if _is_s3:
-        from agentic_retrieval_research.utils.s3_utils import s3_write_text
-    else:
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"Saving results to {output_dir_str}/...")
 
     # Save as JSON
-    json_path = f"{output_dir_str.rstrip('/')}/results.json" if _is_s3 else output_dir / "results.json"
+    json_path = output_dir / "results.json"
     save_ranking_results(results, json_path, format_type="json")
     logger.info(f"  ✓ Saved JSON: {json_path}")
 
     # Save as TREC format
-    trec_path = f"{output_dir_str.rstrip('/')}/results.trec" if _is_s3 else output_dir / "results.trec"
+    trec_path = output_dir / "results.trec"
     save_ranking_results(results, trec_path, format_type="trec")
     logger.info(f"  ✓ Saved TREC: {trec_path}")
 
     # Save LLM outputs as JSONL (one query per line)
     if llm_outputs:
         llm_content = "\n".join(json.dumps(o) for o in llm_outputs) + "\n"
-        if _is_s3:
-            llm_path = f"{output_dir_str.rstrip('/')}/llm_outputs.jsonl"
-            s3_write_text(llm_path, llm_content)
-        else:
-            llm_path = output_dir / "llm_outputs.jsonl"
-            with open(llm_path, "w", encoding="utf-8") as f:
-                f.write(llm_content)
+        llm_path = output_dir / "llm_outputs.jsonl"
+        with open(llm_path, "w", encoding="utf-8") as f:
+            f.write(llm_content)
         logger.info(f"  ✓ Saved LLM outputs: {llm_path}")
 
     # Save combined summary (includes metrics)
@@ -366,13 +356,9 @@ def save_results(
         }
 
     summary_content = json.dumps(summary, indent=2)
-    if _is_s3:
-        summary_path = f"{output_dir_str.rstrip('/')}/summary.json"
-        s3_write_text(summary_path, summary_content)
-    else:
-        summary_path = output_dir / "summary.json"
-        with open(summary_path, "w", encoding="utf-8") as f:
-            f.write(summary_content)
+    summary_path = output_dir / "summary.json"
+    with open(summary_path, "w", encoding="utf-8") as f:
+        f.write(summary_content)
     logger.info(f"  ✓ Saved summary: {summary_path}")
 
     logger.info("All results saved successfully")
@@ -717,11 +703,9 @@ class RetrievalEvaluator:
         6th column records the step number (``iter_1``, ``iter_2``, ...).
 
         Standard TREC columns: ``qid Q0 doc_id rank score run_tag``
-
-        Supports both local paths and S3 URIs.
         """
         output_dir_str = str(output_dir)
-        s3_makedirs(output_dir_str)
+        Path(output_dir_str).mkdir(parents=True, exist_ok=True)
 
         iterations = _extract_trajectory_iterations(
             result.get("trajectory", []), eval_top_k=self.eval_top_k,
@@ -745,25 +729,18 @@ class RetrievalEvaluator:
         if lines:
             content += "\n"
         trec_path = f"{output_dir_str.rstrip('/')}/{query_id}.trec"
-        with s3_open(trec_path, "w") as f:
+        with open(trec_path, "w") as f:
             f.write(content)
 
     def save_results(self, metrics: Dict[str, Any], output_path) -> None:
-        """Save retrieval evaluation metrics to a JSON file.
-
-        Supports both local paths and S3 URIs.
-        """
+        """Save retrieval evaluation metrics to a JSON file."""
         if not metrics:
             return
         output_path_str = str(output_path)
-        if is_s3_path(output_path_str):
-            from agentic_retrieval_research.utils.s3_utils import s3_write_text
-            s3_write_text(output_path_str, json.dumps(metrics, indent=2, default=str))
-        else:
-            output_path = Path(output_path)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(output_path, "w", encoding="utf-8") as f:
-                json.dump(metrics, f, indent=2, default=str)
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(metrics, f, indent=2, default=str)
         print(f"  Saved retrieval metrics: {output_path_str}")
 
 
@@ -946,16 +923,13 @@ class SeenDocRetrievalEvaluator:
         result: Dict[str, Any],
         output_dir,
     ) -> None:
-        """Save seen-doc retrieval results for a single query as a TREC file.
-
-        Supports both local paths and S3 URIs.
-        """
+        """Save seen-doc retrieval results for a single query as a TREC file."""
         iterations = _extract_seen_iterations(result.get("trajectory", []))
         if not iterations:
             return
 
         output_dir_str = str(output_dir)
-        s3_makedirs(output_dir_str)
+        Path(output_dir_str).mkdir(parents=True, exist_ok=True)
 
         lines: List[str] = []
         for iter_idx, iteration_docs in enumerate(iterations, 1):
@@ -970,5 +944,5 @@ class SeenDocRetrievalEvaluator:
         if lines:
             content += "\n"
         trec_path = f"{output_dir_str.rstrip('/')}/{query_id}.trec"
-        with s3_open(trec_path, "w") as f:
+        with open(trec_path, "w") as f:
             f.write(content)

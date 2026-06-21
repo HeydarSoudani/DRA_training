@@ -5,7 +5,7 @@ Rubrics for Deep Research") for the pipeline's LLM and retriever infrastructure.
 
 All DR-Tulu artefacts have been migrated locally:
   prompts/drtulu/system.txt  – system prompt  (action format: think/tool/answer/cite)
-  src/drtulu_parser.py       – action parser   (UnifiedToolCallParserV20250824)
+  drtulu_agent.py            – action parser   (UnifiedToolCallParserV20250824, inlined)
 
 Action format (from prompts/drtulu/system.txt):
   <think>...</think>                    – internal reasoning (think action)
@@ -32,8 +32,11 @@ Retrieval  : pipeline local retriever  (retriever.retrieve)
 import logging
 import re
 import sys
+from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+from pydantic import BaseModel, Field
 
 # ── Path setup ────────────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
@@ -43,15 +46,71 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts" / "drtulu"
 SYSTEM_PROMPT = (_PROMPT_DIR / "system.txt").read_text()
 
-from src.drtulu_parser import UnifiedToolCallParserV20250824  # noqa: E402
+
+# ── DR-Tulu action parser (from dr-tulu/agent/dr_agent/tool_interface/tool_parsers.py) ──
+
+class ToolCallInfo(BaseModel):
+    """Metadata about a single parsed tool call."""
+    content: str
+    parameters: Dict[str, Any] = Field(default_factory=dict)
+    start_pos: int
+    end_pos: int
+
+
+class ToolCallParser(ABC):
+    @abstractmethod
+    def has_calls(self, text: str, tool_name: str) -> bool: ...
+    @abstractmethod
+    def parse_call(self, text: str, tool_name: str) -> Optional[ToolCallInfo]: ...
+    @abstractmethod
+    def format_result(self, formatted_output: str, output: Any) -> str: ...
+    @property
+    @abstractmethod
+    def stop_sequences(self) -> List[str]: ...
+
+
+class UnifiedToolCallParserV20250824(ToolCallParser):
+    """Parser for <call_tool name="...">...</call_tool> and </call> closing variant."""
+
+    @property
+    def stop_sequences(self) -> List[str]:
+        return ["</call_tool>", "</call>"]
+
+    def has_calls(self, text: str, tool_name: str) -> bool:
+        for pattern in [
+            r'<call_tool\s+name="' + re.escape(tool_name) + r'"[^>]*?>.*?</call_tool>',
+            r'<call_tool\s+name="' + re.escape(tool_name) + r'"[^>]*?>.*?</call>',
+        ]:
+            if re.search(pattern, text, re.DOTALL):
+                return True
+        return False
+
+    def parse_call(self, text: str, tool_name: str) -> Optional[ToolCallInfo]:
+        for pattern in [
+            r"<call_tool\s+([^>]*?)>(.*?)</call_tool>",
+            r"<call_tool\s+([^>]*?)>(.*?)</call>",
+        ]:
+            for match in re.finditer(pattern, text, re.DOTALL):
+                attrs: Dict[str, str] = dict(re.findall(r'(\w+)="([^"]*)"', match.group(1)))
+                if attrs.get("name") == tool_name:
+                    return ToolCallInfo(
+                        content=match.group(2).strip(),
+                        parameters={k: v for k, v in attrs.items() if k != "name"},
+                        start_pos=match.start(),
+                        end_pos=match.end(),
+                    )
+        return None
+
+    def format_result(self, formatted_output: str, output: Any) -> str:
+        return f"<tool_output>{formatted_output}</tool_output>"
 
 # ── Pipeline imports (LLM + retriever) ───────────────────────────────────────
-from agentic_retrieval_research.llm_utils.litellm_client import LiteLLMClient              # noqa: E402
+from utils.llm_client import LiteLLMClient              # noqa: E402
 
 from .base_agent import BasicAgent                                                           # noqa: E402
-from agent_tools.trajectory_tracker import TrackerCriticalThinkResult, TrackerEarlyStopResult  # noqa: E402
-from prompts.trajectory_tracker.answer_prompts import FINAL_ANSWER_INSTRUCTION, DRTULU_FORMAT
-from utils.doc_formatting import format_as_snippets                                          # noqa: E402
+from controller_component import TrackerCriticalThinkResult, TrackerEarlyStopResult  # noqa: E402
+from controller_component.prompts.answer_prompts import FINAL_ANSWER_INSTRUCTION, DRTULU_FORMAT
+from utils.text_utils import format_as_snippets                                          # noqa: E402
 
 logger = logging.getLogger(__name__)
 

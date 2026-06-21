@@ -20,8 +20,8 @@ except ImportError:
     json5 = None
 
 from .base_agent import BasicAgent
-from agent_tools.trajectory_tracker import TrackerCriticalThinkDeferred, TrackerCriticalThinkResult, TrackerEarlyStopResult
-from prompts.trajectory_tracker.answer_prompts import (
+from controller_component import TrackerCriticalThinkDeferred, TrackerCriticalThinkResult, TrackerEarlyStopResult
+from controller_component.prompts.answer_prompts import (
     FINAL_ANSWER_INSTRUCTION,
     TAG_FORMAT,
     TONGYI_CANDIDATE_ANSWER,
@@ -29,9 +29,9 @@ from prompts.trajectory_tracker.answer_prompts import (
     AnswerCandidateOutput,
     extract_answer_candidates,
 )
-from utils.parsing import extract_tag_content, extract_all_tag_content, parse_tool_calls_xml_list
-from utils.doc_formatting import format_as_markdown
-from utils.inference_config import InferenceConfig
+from utils.text_utils import extract_tag_content, extract_all_tag_content, parse_tool_calls_xml_list
+from utils.text_utils import format_as_markdown
+from utils.config import InferenceConfig
 from utils.llm_client import VLLMClient
 
 logger = logging.getLogger(__name__)

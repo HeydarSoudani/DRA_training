@@ -8,7 +8,7 @@ from typing import Dict, Any, Optional, List
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from agentic_retrieval_research.llm_utils.litellm_client import LiteLLMClient
+from utils.llm_client import LiteLLMClient
 from prompts.react.plan_create import REACT_PLAN_CREATE_PROMPT
 from prompts.react.plan_update import REACT_PLAN_UPDATE_PROMPT
 

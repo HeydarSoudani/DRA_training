@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
-from agentic_retrieval_research.llm_utils.litellm_client import LiteLLMClient
+from utils.llm_client import LiteLLMClient
 _PROMPT_DIR = Path(__file__).parent.parent / "prompts" / "research"
 SYSTEM_PROMPT_RESEARCH_INST = (_PROMPT_DIR / "system.txt").read_text()
 

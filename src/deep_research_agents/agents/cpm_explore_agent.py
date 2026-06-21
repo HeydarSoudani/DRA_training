@@ -29,14 +29,14 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import openai
 
 from .base_agent import BasicAgent
-from prompts.trajectory_tracker.answer_prompts import (
+from controller_component.prompts.answer_prompts import (
     CANDIDATE_GENERATION_INSTRUCTION,
     CPM_EXPLORE_FORMAT,
     FINAL_ANSWER_INSTRUCTION,
     AnswerCandidateOutput,
     extract_answer_candidates,
 )
-from utils.inference_config import InferenceConfig
+from utils.config import InferenceConfig
 
 logger = logging.getLogger(__name__)
 

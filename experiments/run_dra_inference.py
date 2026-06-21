@@ -68,21 +68,17 @@ logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 logging.getLogger("asyncio.sslproto").setLevel(logging.CRITICAL)
 
 import sys
-repo_root = Path(__file__).resolve().parents[2]
-sys.path.append(str(repo_root / "src"))
-sys.path.append(str(repo_root))
-# agents/ package lives next to this file
-sys.path.append(str(Path(__file__).resolve().parent))
-# decision_making_agent/ package lives under experiments/
-sys.path.append(str(repo_root / "experiments"))
+_project_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_project_root))        # utils/, experiments/
+sys.path.insert(0, str(_project_root / "src")) # corpus_dataset/, deep_research_agents/, evaluation/, searcher_component/
 
-from agentic_retrieval_research.corpus_dataset.dataset import load_queries, load_qrels, load_query_answers
+from indexing_corpus_dataset.dataset_loaders import load_queries, load_qrels, load_query_answers
 
-from agents import (
+from deep_research_agents.agents import (
     AGENT_MAP, OSS_BedrockAgent, BEDROCK_OSS_MODELS,
     ALL_AGENTS,
 )
-from utils.general_utils import (
+from utils.pipeline import (
     _build_cited_docs_ranked_list,
     _gpu_worker,
     _resolve_dataset_defaults,
@@ -91,38 +87,15 @@ from utils.general_utils import (
     _setup_retriever,
     _assemble_pipeline_kwargs,
     _cleanup_event_loop,
+    _build_run_name_for_pipeline,
+    _build_searcher_config_name,
 )
-from utils.doc_formatting import build_references_section
-from agentic_retrieval_research.evaluation import RetrievalEvaluator, GenerationEvaluator, TrajectoryEvaluator, TrackerEvaluator, CitedDocRetrievalEvaluator, SeenDocRetrievalEvaluator
-from agentic_retrieval_research.utils.s3_utils import (
-    is_s3_path, s3_exists,
-    get_processed_queries, load_result_from_trec, setup_output_dirs,
-)
-# Guard: decision_making_agent.utils transitively imports torch (via
-# fusion_utils.py) which can pre-initialise CUDA in multiprocessing-spawn'd
-# children before they pin CUDA_VISIBLE_DEVICES to their assigned GPU.
-# Children only need _gpu_worker (from general_utils), not these symbols.
-if __name__ != "__mp_main__":
-    from decision_making_agent.utils import evaluate_and_save, ALL_AGGREGATION_FUSION_METHODS, run_fusion_eval, build_evaluators, load_processed_results
+from utils.text_utils import build_references_section
+from utils.io_utils import get_processed_queries, setup_output_dirs
+from evaluation import RetrievalEvaluator, GenerationEvaluator, TrajectoryEvaluator, TrackerEvaluator, CitedDocRetrievalEvaluator, SeenDocRetrievalEvaluator
+from utils.eval_utils import evaluate_and_save, ALL_AGGREGATION_FUSION_METHODS, run_fusion_eval, build_evaluators, load_processed_results
 
-# ── S3 output defaults ─────────────────────────────────────────────────────
-_S3_BUCKET = "a204383-ml-workspace-practicallawqw7t-use1"
-_S3_OUTPUT_PREFIX = f"s3://{_S3_BUCKET}/agentic_retrieval/run_outputs/experiments_deepresearch_agents"
-_LOCAL_OUTPUT_PREFIX = str(Path(__file__).resolve().parent / "run_outputs")
-
-# Redirect HuggingFace caches (model weights, datasets Arrow files) and TMPDIR
-# so they don't fill the small root filesystem on SageMaker instances.
-_NVME_HF = "/mnt/sagemaker-nvme/huggingface"
-if os.path.isdir("/mnt/sagemaker-nvme"):
-    os.makedirs(_NVME_HF, exist_ok=True)
-    os.environ.setdefault("HF_HOME", _NVME_HF)
-elif os.path.isdir("/opt/ml"):
-    _EBS_TMP = "/opt/ml/tmp"
-    os.makedirs(_EBS_TMP, exist_ok=True)
-    _EBS_HF = os.path.join(_EBS_TMP, "huggingface")
-    os.makedirs(_EBS_HF, exist_ok=True)
-    os.environ.setdefault("HF_HOME", _EBS_HF)
-    os.environ.setdefault("TMPDIR", _EBS_TMP)
+_OUTPUT_PREFIX = str(Path(__file__).resolve().parent / "run_outputs")
 
 # Set API keys only if not already set (e.g. by .env or shell env)
 os.environ.setdefault("TAVILY_API_KEY", "")  # https://app.tavily.com/
@@ -212,27 +185,21 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
         dataset_dir = f"{dataset}_{file_data_set}{qk_part}_{retriever_label}"
         searcher_config_name = _build_searcher_config_name(**kwargs)
 
-        # Build run_dir as S3 URI or local Path
-        _is_s3_output = is_s3_path(str(output_path))
-        if _is_s3_output:
-            run_dir = f"{str(output_path).rstrip('/')}/{dataset_dir}/{run_name}/{searcher_config_name}"
-        else:
-            run_dir = str(Path(output_path) / dataset_dir / run_name / searcher_config_name)
+        run_dir = str(Path(output_path) / dataset_dir / run_name / searcher_config_name)
 
-        _storage_label = "S3" if _is_s3_output else "local"
         print(f"\n{'=' * 80}")
-        print(f"[OUTPUT] Loading/saving results from {_storage_label}: {run_dir}")
+        print(f"[OUTPUT] Loading/saving results from: {run_dir}")
         print(f"{'=' * 80}")
 
         processed = get_processed_queries(run_dir)
         if processed:
-            print(f"Found {len(processed)} already processed queries on {_storage_label} — skipping them")
+            print(f"Found {len(processed)} already processed queries — skipping them")
             original_count = len(queries)
             queries = {qid: q for qid, q in queries.items() if qid not in processed}
             print(f"Remaining: {len(queries)} queries (skipped {original_count - len(queries)})")
 
         if not queries:
-            print(f"All queries have already been processed — loading results from {_storage_label} for evaluation")
+            print(f"All queries have already been processed — loading results from disk for evaluation")
 
     # ==================== Limit ====================
     if limit is not None and limit > 0:
@@ -246,8 +213,7 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
             print("--eval-only requires a valid --output directory with existing results.")
             return
         _run_dir_str = str(run_dir)
-        _is_s3_run = is_s3_path(_run_dir_str)
-        if not _is_s3_run and not Path(_run_dir_str).exists():
+        if not Path(_run_dir_str).exists():
             print(f"--eval-only: run_dir does not exist: {run_dir}")
             return
 
@@ -293,31 +259,31 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
         run_fusion_eval(results, retrieval_evaluator.qrels, kwargs, run_dir, num_gpus)
         return
 
-    # ==================== Inject qrels into worker_config for multi-GPU tracker ==
-    _tt_mode = kwargs.get("trajectory_tracker", "monitor")
-    if worker_config is not None and _tt_mode != "off":
+    # ==================== Inject qrels into worker_config for multi-GPU controller ==
+    _controller_mode = kwargs.get("controller", "monitor")
+    if worker_config is not None and _controller_mode != "off":
         worker_config["qrels"] = qrels
 
-    # ==================== Build trajectory tracker ====================
-    from utils.general_utils import build_trajectory_tracker
+    # ==================== Build controller ====================
+    from utils.pipeline import build_controller
 
-    trajectory_tracker = build_trajectory_tracker(
-        tt_mode=_tt_mode,
+    controller = build_controller(
+        controller_mode=_controller_mode,
         retriever=kwargs.get("retriever"),
         qrels=qrels,
         seen_top_k=kwargs.get("seen_top_k", 5),
-        llm_decision_maker=kwargs.get("llm_decision_maker"),
+        llm_controller=kwargs.get("llm_controller"),
         llm_intervene=kwargs.get("llm_intervene"),
-        decision_maker_history_window=kwargs.get("decision_maker_history_window"),
-        dm_prompt_variant=kwargs.get("dm_prompt_variant", "nov_cov_sim"),
+        controller_history_window=kwargs.get("controller_history_window"),
+        controller_prompt_variant=kwargs.get("controller_prompt_variant", "nov_cov_sim"),
         max_iteration=kwargs.get("max_iteration"),
-        aspect_coverage_mode=kwargs.get("aspect_coverage_mode", "dynamic"),
-        aspect_coverage_max_aspects=kwargs.get("aspect_coverage_max_aspects", 8),
-        llm_aspect_coverage=kwargs.get("llm_aspect_coverage"),
+        criteria_coverage_mode=kwargs.get("criteria_coverage_mode", "dynamic"),
+        criteria_coverage_max_criteria=kwargs.get("criteria_coverage_max_criteria", 8),
+        llm_criteria_coverage=kwargs.get("llm_criteria_coverage"),
     )
 
     # ==================== Build search tool ====================
-    from agentic_retrieval_research.searcher_component.searcher import RetrievalSearchTool
+    from searcher_component.searcher import RetrievalSearchTool
 
     _retriever = kwargs.get("retriever")
     search_tool = None
@@ -390,9 +356,9 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
         if agent is not None and search_tool is not None and hasattr(agent, "search_tool"):
             agent.search_tool = search_tool
 
-        # Inject trajectory tracker into agents that inherit from BasicAgent
-        if agent is not None and trajectory_tracker is not None and hasattr(agent, "trajectory_tracker"):
-            from prompts.trajectory_tracker.answer_prompts import get_candidate_format
+        # Inject controller into agents that inherit from BasicAgent
+        if agent is not None and controller is not None and hasattr(agent, "controller"):
+            from controller_component.prompts.answer_prompts import get_candidate_format
 
             # Always set the canonical per-agent format on inference_config
             _cfg = getattr(agent, "inference_config", None)
@@ -402,13 +368,13 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
             # Wire answer candidate generation through the agent (browsecomp_plus only)
             if dataset == "browsecomp_plus" and agentic_model != "cpm_report":
                 if hasattr(agent, "generate_answer_candidate"):
-                    trajectory_tracker._answer_candidate_fn = agent.generate_answer_candidate
+                    controller._answer_candidate_fn = agent.generate_answer_candidate
                     _model_id = _cfg.model_name if _cfg else "unknown"
                     print(f"Answer candidate via agent.generate_answer_candidate: {_model_id}")
                 else:
                     pass
 
-            agent.trajectory_tracker = trajectory_tracker
+            agent.controller = controller
 
     # (else: multi-GPU — agent loading deferred to worker processes)
 
@@ -572,21 +538,21 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
     # collect them before we reclaim the GPUs.
     #
     # Reference chains that keep the encoder model alive:
-    #   1. trajectory_tracker._answer_candidate_fn → bound method → agent → retriever.encoder
-    #   2. trajectory_tracker._consec_query_sim._encode_fn → closure → encoder
-    #   3. trajectory_tracker._orig_query_sim._encode_fn  → closure → encoder
+    #   1. controller._answer_candidate_fn → bound method → agent → retriever.encoder
+    #   2. controller._consec_query_sim._encode_fn → closure → encoder
+    #   3. controller._orig_query_sim._encode_fn  → closure → encoder
     #   4. agent.search_tool.retriever → retriever.encoder
     #   5. agent.retriever → retriever.encoder
     #   6. kwargs["retriever"] → retriever.encoder
 
-    # 1) Sever closure/bound-method refs inside trajectory_tracker
-    if trajectory_tracker is not None:
-        if hasattr(trajectory_tracker, "_answer_candidate_fn"):
-            trajectory_tracker._answer_candidate_fn = None
-        if hasattr(trajectory_tracker, "_consec_query_sim"):
-            trajectory_tracker._consec_query_sim._encode_fn = None
-        if hasattr(trajectory_tracker, "_orig_query_sim"):
-            trajectory_tracker._orig_query_sim._encode_fn = None
+    # 1) Sever closure/bound-method refs inside controller
+    if controller is not None:
+        if hasattr(controller, "_answer_candidate_fn"):
+            controller._answer_candidate_fn = None
+        if hasattr(controller, "_consec_query_sim"):
+            controller._consec_query_sim._encode_fn = None
+        if hasattr(controller, "_orig_query_sim"):
+            controller._orig_query_sim._encode_fn = None
 
     # 2) Move the encoder model off GPU *before* dropping references.
     #    Accelerate's device_map hooks can prevent gc from freeing GPU
@@ -605,7 +571,7 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
     del _enc
 
     # 3) Drop all local + kwargs references
-    del agent, search_tool, _retriever, trajectory_tracker
+    del agent, search_tool, _retriever, controller
     kwargs.pop("retriever", None)
     kwargs.pop("post_retrieval_reranker", None)
     kwargs.pop("post_fusion_reranker", None)
@@ -650,83 +616,9 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
 
     # ==================== Final status ==========================================
     if output_path and run_dir:
-        _storage = "S3" if is_s3_path(str(run_dir)) else "local"
         print(f"\n{'=' * 80}")
-        print(f"[OUTPUT] All results saved to {_storage}: {run_dir}")
+        print(f"[OUTPUT] All results saved to: {run_dir}")
         print(f"{'=' * 80}")
-
-
-# ============================================================================
-# Run-name builder
-# ============================================================================
-def _build_searcher_config_name(**kwargs) -> str:
-    """Build an abbreviated searcher-config directory name.
-
-    Encodes: seen_top_k, post_retrieval_reranker, post_fusion_reranker,
-    rerank_top_k, retrieval_input, post_fusion_reranker_input.
-
-    Example: stk10_prr-null_pfr-bat_rrk100_ri-sq_pfri-oq
-    """
-    _reranker_alias = {
-        "null":              "null",
-        "batched_reranker":  "bat",
-        "rankllama":         "rll",
-        "rank1":             "rk1",
-        "qwen3_reranker":    "qw3",
-    }
-    _ri_alias = {
-        "subquery":                "sq",
-        "original_query+subquery": "oq+sq",
-        "reasoning+subquery":      "rs+sq",
-    }
-    _pfri_alias = {
-        "original_query":            "oq",
-        "original_query+subqueries": "oq+sqs",
-        "original_query+reasoning":  "oq+rs",
-        "reasoning+subqueries":      "rs+sqs",
-    }
-
-    _tt_alias = {
-        "off":             "off",
-        "monitor":         "mon",
-        "decision_maker":  "dm",
-    }
-
-    seen_top_k   = kwargs.get("seen_top_k", 10)
-    prr          = kwargs.get("post_retrieval_reranker_name", "null")
-    pfr          = kwargs.get("post_fusion_reranker_name", "batched_reranker")
-    rrk          = kwargs.get("rerank_top_k", 100)
-    ri           = kwargs.get("retrieval_input", "subquery")
-    pfri         = kwargs.get("post_fusion_reranker_input", "original_query")
-    tt_mode      = kwargs.get("trajectory_tracker", "monitor")
-    dm_llm       = kwargs.get("llm_decision_maker")
-
-    prr_short  = _reranker_alias.get(prr, prr)
-    pfr_short  = _reranker_alias.get(pfr, pfr)
-    ri_short   = _ri_alias.get(ri, ri)
-    pfri_short = _pfri_alias.get(pfri, pfri)
-    tt_short   = _tt_alias.get(tt_mode, tt_mode)
-    ensure_novel = kwargs.get("ensure_novel_seen_docs", False)
-
-    name = f"stk{seen_top_k}_prr-{prr_short}_pfr-{pfr_short}_rrk{rrk}_ri-{ri_short}_pfri-{pfri_short}_tt-{tt_short}"
-    if tt_mode == "decision_maker":
-        _dm_label = dm_llm or kwargs.get("llm_intervene") or "default"
-        _dmv = kwargs.get("dm_prompt_variant", "nov_cov_sim")
-        name += f"_dm-{_dm_label.replace('/', '--')}_dmv-{_dmv}"
-    if ensure_novel:
-        name += "_novel"
-    return name
-
-def _build_run_name_for_pipeline(agentic_model, llm_model, **kwargs) -> str:
-    """Build a consistent output directory name for the current pipeline run.
-
-    Template: {agent_name}_{model}
-    Dataset/retriever/query_key info now lives in the parent dataset_dir.
-    """
-    name = agentic_model
-    if agentic_model == "react":
-        name = "react_w_plan" if kwargs.get("use_plan", False) else "react_wo_plan"
-    return f"{name}_agent_{llm_model.replace('/', '--')}"
 
 
 # ============================================================================
@@ -757,7 +649,7 @@ def _parse_args():
     # ── Agent ──────────────────────────────────────────────────────
     parser.add_argument("--agentic-model", type=str, default="glm", choices=ALL_AGENTS, help="Agent to run. cpm_report = Writing-as-Reasoning (report generation); searchr1/research/stepsearch/react/selfask/searcho1 = Reasoning-augmented retrieval; glm/oss/tongyi = vendor-specific ReAct agents.")
     # ── Dataset ────────────────────────────────────────────────────────────
-    parser.add_argument("--dataset", type=str, default="neuclir", choices=["trec_rag", "neuclir", "browsecomp_plus"], help="Dataset. trec_rag/neuclir/browsecomp_plus use local indices.")
+    parser.add_argument("--dataset", type=str, default="neuclir", choices=["browsecomp_plus", "trec_rag", "neuclir"], help="Dataset. trec_rag/neuclir/browsecomp_plus use local indices.")
     parser.add_argument("--data-path", type=str, default=None, help="Path to dataset directory (auto-selected if omitted)")
     parser.add_argument("--subset", type=str, default=None, help="Dataset subset: None for trec_rag; 'news', 'technical', or 'report' for neuclir; 'test' for browsecomp_plus. Auto-selected if omitted.")
     parser.add_argument("--dataset-year", type=str, default=None, help="Dataset year for trec_rag/neuclir (e.g. '2023', '2024'). Auto-selected if omitted.")
@@ -794,15 +686,15 @@ def _parse_args():
     parser.add_argument("--max-extend-steps", type=int, default=5, help="Max outline extensions (cpm_report)")
     parser.add_argument("--with-oracle-outline", type=_sm_bool, nargs="?", const=True, default=False, help="When set, the initial search is skipped and the outline is generated from oracle aspects (gold_retriever_analysis). Path to generation.json is auto-resolved from the dataset config. (cpm_report only)")
     parser.add_argument("--hard-mode", type=_sm_bool, nargs="?", const=True, default=True, help="Enforce strict validation rules (cpm_report)")
-    # ── Trajectory tracker ────────────────────────────────────────────────
-    parser.add_argument("--trajectory-tracker", type=str, default="decision_maker", choices=["off", "monitor", "decision_maker"], help="Trajectory tracker mode. 'off': disabled. 'monitor': compute and log scores only, no intervention. 'decision_maker': trajectory-tracker-based decision maker.")
-    parser.add_argument("--llm-decision-maker", type=str, default="claude-sonnet-4-6", help="LLM model for the decision maker (e.g. 'gpt-4.1-mini', 'claude-sonnet-4-6'). When set, overrides --llm-intervene for the decision_maker mode. If not set, falls back to --llm-intervene.")
-    parser.add_argument("--llm-intervene", type=str, default="claude-sonnet-4-6", help="LLM model for generating critical_thinking interventions (e.g. 'gpt-4.1-mini', 'claude-sonnet-4-6'). Required when --trajectory-tracker=decision_maker. Uses a lightweight LiteLLMClient separate from the agent's main LLM.")
-    parser.add_argument("--decision-maker-history-window", type=int, default=None, help="Number of recent signal/action history entries shown to the decision maker. None (default) means full history.")
-    parser.add_argument("--dm-prompt-variant", type=str, default="sim", choices=["nov", "nov_cov", "nov_sim", "nov_cov_sim", "sim", "cov_sim"], help="Decision maker prompt variant controlling which signals the DM sees. 'nov': novelty only. 'nov_cov': novelty + aspect coverage. 'nov_sim': novelty + consec_query_sim + orig_query_sim. 'nov_cov_sim': novelty + aspect coverage + consec_query_sim + orig_query_sim. 'sim': consec_query_sim (primary) + orig_query_sim (guardrail). 'cov_sim': aspect coverage (primary) + consec_query_sim + orig_query_sim (no novelty). Default: 'nov_cov_sim'.")
-    parser.add_argument("--aspect-coverage-mode", type=str, default=None, choices=["static", "dynamic"], help="Aspect coverage mode. 'static': aspects extracted from query text (e.g. BrowseCompPlus). 'dynamic': LLM decomposes query and updates aspects each iteration.")
-    parser.add_argument("--aspect-coverage-max-aspects", type=int, default=8, help="Soft cap on the number of aspects tracked.")
-    parser.add_argument("--llm-aspect-coverage", type=str, default="claude-sonnet-4-6", help="LLM model for aspect coverage evaluation. Falls back to --llm-decision-maker if not set.")
+    # ── Controller ────────────────────────────────────────────────────────
+    parser.add_argument("--controller", type=str, default="action", choices=["off", "monitor", "action"], help="Controller mode. 'off': disabled. 'monitor': compute and log scores only, no intervention. 'action': controller takes corrective actions (intervene/stop) via the controller policy.")
+    parser.add_argument("--llm-controller", type=str, default="claude-sonnet-4-6", help="LLM model for the controller policy (e.g. 'gpt-4.1-mini', 'claude-sonnet-4-6'). When set, overrides --llm-intervene for the controller policy. If not set, falls back to --llm-intervene.")
+    parser.add_argument("--llm-intervene", type=str, default="claude-sonnet-4-6", help="LLM model for generating critical_thinking interventions (e.g. 'gpt-4.1-mini', 'claude-sonnet-4-6'). Required when --controller=action. Uses a lightweight LiteLLMClient separate from the agent's main LLM.")
+    parser.add_argument("--controller-history-window", type=int, default=None, help="Number of recent signal/action history entries shown to the controller policy. None (default) means full history.")
+    parser.add_argument("--controller-prompt-variant", type=str, default="sim", choices=["nov", "nov_cov", "nov_sim", "nov_cov_sim", "sim", "cov_sim"], help="Controller policy prompt variant controlling which signals the controller sees. 'nov': novelty only. 'nov_cov': novelty + criteria coverage. 'nov_sim': novelty + consec_query_sim + orig_query_sim. 'nov_cov_sim': novelty + criteria coverage + consec_query_sim + orig_query_sim. 'sim': consec_query_sim (primary) + orig_query_sim (guardrail). 'cov_sim': criteria coverage (primary) + consec_query_sim + orig_query_sim (no novelty). Default: 'nov_cov_sim'.")
+    parser.add_argument("--criteria-coverage-mode", type=str, default=None, choices=["static", "dynamic"], help="Criteria coverage mode. 'static': criteria extracted from query text (e.g. BrowseCompPlus). 'dynamic': LLM decomposes query and updates criteria each iteration.")
+    parser.add_argument("--criteria-coverage-max-criteria", type=int, default=8, help="Soft cap on the number of criteria tracked.")
+    parser.add_argument("--llm-criteria-coverage", type=str, default="claude-sonnet-4-6", help="LLM model for criteria coverage evaluation. Falls back to --llm-controller if not set.")
 
     # ── Evaluation ─────────────────────────────────────────────────────────
     parser.add_argument("--k-values", type=str, nargs="+", default=[1, 3, 5, 10, 25, 50, 75, 100, 500, 1000], help="K values for retrieval evaluation metrics")
@@ -813,8 +705,7 @@ def _parse_args():
     parser.add_argument("--judge-api-url", type=str, default=None, help="OpenAI-compatible API base URL for an externally-managed accuracy-evaluation judge server (e.g. http://localhost:6009/v1). When set, the pipeline uses this URL instead of auto-starting its own Qwen3-32B judge server. Start the server with: bash experiments/deep_research_agents/vllm_server_scripts/serve_judge_qwen3.sh")
 
     # ── Execution & Output ─────────────────────────────────────────────────
-    parser.add_argument("--result-files-src", type=str, default="s3", choices=["s3", "local"], help="Source for saving/loading results: 's3' uses S3, 'local' uses experiments/deep_research_agents/run_outputs")
-    parser.add_argument("--output", type=str, default=None, help="Root directory for results (overrides --result-files-src)")
+    parser.add_argument("--output", type=str, default=None, help="Root directory for results (defaults to experiments/run_outputs/)")
     parser.add_argument("--max-iteration", type=int, default=100, help="Max iterations/steps per query (all agents)")
     parser.add_argument("--max-retries", type=int, default=3, help="Max retries when output format fails (all agents)")
     parser.add_argument("--verbose", type=_sm_bool, nargs="?", const=True, default=True, help="Print detailed logs")
@@ -822,13 +713,11 @@ def _parse_args():
     parser.add_argument("--num-gpus", type=int, default=1, help="Number of GPU workers for query-level parallelism. 0 = auto-detect from torch.cuda.device_count(). Each worker loads its own model instance on its assigned GPU.")
     parser.add_argument("--gpu-ids", type=str, default=None, help="Comma-separated physical GPU IDs for workers (e.g. '4,5,6,7'). Overrides the default 0..num_gpus-1 assignment. Also sets num-gpus to the number of IDs if --num-gpus is 1.")
     parser.add_argument("--eval-only", type=_sm_bool, nargs="?", const=True, default=False, help="Skip agent execution and run only evaluation on already-generated results. Runs all evaluators (generation, trajectory, tracker, cited-doc, seen-doc, accuracy, fusion). Requires the run to have been completed at least once so that trajectory/ and retrieval/ files exist. When --judge-api-url is set, also runs accuracy evaluation.")
-    parser.add_argument("--parse-only", action="store_true", default=False, help="Parse arguments, print them as JSON, and exit. Used by the submitter to validate hyperparameters before launching a SageMaker job.")
 
     args = parser.parse_args()
 
-    # ── Post-parse: resolve --output from --result-files-src ──────────────
     if args.output is None:
-        args.output = _S3_OUTPUT_PREFIX if args.result_files_src == "s3" else _LOCAL_OUTPUT_PREFIX
+        args.output = _OUTPUT_PREFIX
 
     # ── Post-parse: normalise SageMaker-serialised list args ───────────────
     # SageMaker sends nargs="+" values as a single space-separated string;
@@ -844,11 +733,6 @@ def main():
     """Main entry point."""
     args    = _parse_args()
 
-    if args.parse_only:
-        import json
-        print(json.dumps({k: v for k, v in vars(args).items() if k != "parse_only"}, default=str))
-        return
-
     verbose = args.verbose and not args.quiet
 
     if args.quiet:
@@ -859,16 +743,16 @@ def main():
 
     _resolve_dataset_defaults(args)
 
-    # ── Default aspect-coverage mode per dataset (user can override via CLI) ──
-    if args.aspect_coverage_mode is None:
+    # ── Default criteria-coverage mode per dataset (user can override via CLI) ──
+    if args.criteria_coverage_mode is None:
         if args.dataset == "browsecomp_plus":
-            args.aspect_coverage_mode = "static"
+            args.criteria_coverage_mode = "static"
         else:
-            args.aspect_coverage_mode = "dynamic"
+            args.criteria_coverage_mode = "dynamic"
 
-    # ── Default DM prompt variant per dataset (user can override via CLI) ──
-    if args.dm_prompt_variant is None:
-        args.dm_prompt_variant = "nov_cov_sim"
+    # ── Default controller prompt variant per dataset (user can override via CLI) ──
+    if args.controller_prompt_variant is None:
+        args.controller_prompt_variant = "nov_cov_sim"
 
     # ── Resolve --with-oracle-outline to an actual file path ─────────────
     if args.with_oracle_outline:
@@ -964,9 +848,9 @@ def main():
     # GPU (see _init_worker).  Loading one in the main process would waste
     # GPU memory on a device that a worker needs (e.g. rankllama = ~14 GB).
     if num_gpus <= 1 and not args.eval_only:
-        from utils.general_utils import get_reranker_configs
+        from utils.pipeline import get_reranker_configs
         _reranker_configs = get_reranker_configs(args.rerank_top_k)
-        from decision_making_agent.utils import build_reranker_from_config
+        from utils.eval_utils import build_reranker_from_config
         if args.post_retrieval_reranker != "null":
             pipeline_kwargs["post_retrieval_reranker"] = build_reranker_from_config(
                 args.post_retrieval_reranker, _reranker_configs,
@@ -1005,8 +889,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-    from agentic_retrieval_research.utils.s3_utils import detach_s3fs_finalizers
-    detach_s3fs_finalizers()
 
 
 # ============================================================================

@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 
 from tqdm import tqdm
 
-from ..llm_utils.litellm_client import LiteLLMClient
+from utils.llm_client import LiteLLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -414,12 +414,8 @@ class AccuracyEvaluator:
             ],
         }
         output_path_str = str(output_path)
-        from agentic_retrieval_research.utils.s3_utils import is_s3_path, s3_write_text
-        if is_s3_path(output_path_str):
-            s3_write_text(output_path_str, json.dumps(save_data, indent=2, default=str))
-        else:
-            output_path = Path(output_path)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(output_path, "w", encoding="utf-8") as f:
-                json.dump(save_data, f, indent=2, default=str)
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(save_data, f, indent=2, default=str)
         print(f"  Saved accuracy results: {output_path_str}")

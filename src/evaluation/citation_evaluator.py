@@ -11,7 +11,6 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
-from agentic_retrieval_research.utils.s3_utils import is_s3_path, s3_open, s3_makedirs
 
 logger = logging.getLogger(__name__)
 
@@ -460,7 +459,7 @@ class CitedDocRetrievalEvaluator:
             return
 
         output_dir_str = str(output_dir)
-        s3_makedirs(output_dir_str)
+        Path(output_dir_str).mkdir(parents=True, exist_ok=True)
 
         lines: List[str] = []
         for rank, doc in enumerate(cited_ranked, 1):
@@ -475,5 +474,5 @@ class CitedDocRetrievalEvaluator:
         if lines:
             content += "\n"
         trec_path = f"{output_dir_str.rstrip('/')}/{query_id}.trec"
-        with s3_open(trec_path, "w") as f:
+        with open(trec_path, "w") as f:
             f.write(content)
