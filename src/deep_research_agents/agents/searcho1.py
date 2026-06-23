@@ -14,7 +14,7 @@ from deep_research_agents.prompts.searcho1.prompts import (
 )
 
 from .base_agent import BasicAgent, passages2string
-from controller_component import TrackerCriticalThinkResult, TrackerEarlyStopResult
+from deep_research_agents.agent_tools.controller_results import CriticalThinkResult, EarlyStopResult
 from controller_component.prompts.answer_prompts import FINAL_ANSWER_INSTRUCTION, BOXED_FORMAT
 
 logger = logging.getLogger(__name__)
@@ -149,17 +149,17 @@ class SearchO1_Agent(BasicAgent):
             else:
                 search_docs, docs_text = [], ''
 
-            # Trajectory tracker: may inject observation, critical_think, or early stop
+            # Trajectory controller: may inject observation, critical_think, or early stop
             seen_docs = search_docs[:self.seen_top_k]
-            tracker_result = self.post_search_evaluate(
+            controller_result = self.post_search_evaluate(
                 subquery=tmp_query or "", docs=seen_docs,
                 iter_num=iter_num, original_query=question,
                 thinking=tmp_think,
                 seen_docs=seen_docs if seen_docs else None,
                 trajectory=input_prompt,
             )
-            if isinstance(tracker_result, TrackerEarlyStopResult):
-                early_stop_result = tracker_result
+            if isinstance(controller_result, EarlyStopResult):
+                early_stop_result = controller_result
 
             reasoning_path.append({
                 'think': tmp_think,
@@ -190,13 +190,13 @@ class SearchO1_Agent(BasicAgent):
             if early_stop_result is not None:
                 break
 
-            # Inject tracker critical_think as an additional full turn
-            if isinstance(tracker_result, TrackerCriticalThinkResult):
-                reasoning_path.append(self._critical_think_to_reasoning_entry(tracker_result))
+            # Inject controller critical_think as an additional full turn
+            if isinstance(controller_result, CriticalThinkResult):
+                reasoning_path.append(self._critical_think_to_reasoning_entry(controller_result))
                 critical_think_step = self.current_step_template.format(
-                    think=tracker_result.critical_think,
-                    search_query=tracker_result.critical_search_query,
-                    search_result=tracker_result.critical_observation,
+                    think=controller_result.critical_think,
+                    search_query=controller_result.critical_search_query,
+                    search_result=controller_result.critical_observation,
                 )
                 input_prompt += critical_think_step
             messages = [{"role": "user", "content": input_prompt}]

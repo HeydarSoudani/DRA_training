@@ -70,10 +70,7 @@ logging.getLogger("asyncio.sslproto").setLevel(logging.CRITICAL)
 
 from indexing_corpus_dataset.dataset_loaders import load_queries, load_qrels, load_query_answers
 
-from deep_research_agents.agents import (
-    AGENT_MAP,
-    ALL_AGENTS,
-)
+from deep_research_agents.agents import ALL_AGENTS
 from utils.config import AGENTIC_MODEL_TO_LLM, AGENTIC_MODEL_ALIAS
 from orchestration import (
     gpu_worker,
@@ -264,24 +261,6 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
     if worker_config is not None and _controller_mode != "off":
         worker_config["qrels"] = qrels
 
-    # ==================== Build controller ====================
-    from orchestration import build_controller
-
-    controller = build_controller(
-        controller_mode=_controller_mode,
-        retriever=kwargs.get("retriever"),
-        qrels=qrels,
-        seen_top_k=kwargs.get("seen_top_k", 5),
-        llm_controller=kwargs.get("llm_controller"),
-        llm_intervene=kwargs.get("llm_intervene"),
-        controller_history_window=kwargs.get("controller_history_window"),
-        controller_prompt_variant=kwargs.get("controller_prompt_variant", "nov_cov_sim"),
-        max_iteration=kwargs.get("max_iteration"),
-        criteria_coverage_mode=kwargs.get("criteria_coverage_mode", "dynamic"),
-        criteria_coverage_max_criteria=kwargs.get("criteria_coverage_max_criteria", 8),
-        llm_criteria_coverage=kwargs.get("llm_criteria_coverage"),
-    )
-
     # ==================== Build search tool ====================
     from searcher_component.searcher import RetrievalSearchTool
 
@@ -300,71 +279,58 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
             seen_top_k=kwargs.get("seen_top_k", 5),
         )
 
-    # ==================== Instantiate Agent ====================
-    # In multi-GPU mode the agent is NOT loaded in the main process; each worker
-    # spawns its own instance on its assigned GPU.
-    agent = None
-    if num_gpus <= 1 and queries:
-        model_class = AGENT_MAP[agentic_model]
-        _max_out = kwargs.get("max_output_tokens_total", 40000)
-        _reasoning_extra: dict = {}
-        if agentic_model == "react":
-            if kwargs.get("use_plan", False):
-                _reasoning_extra["use_plan"] = True
-        if agentic_model == "glm":
-            _reasoning_extra["max_output_tokens"] = min(_max_out, 20000)
-        elif agentic_model == "oss":
-            _reasoning_extra["max_output_tokens"] = _max_out
-            _reasoning_extra["model_name"] = f"openai/{llm_model}"
-        elif agentic_model == "tongyi":
-            _reasoning_extra["max_tokens_per_step"] = min(_max_out, 20000)
-        elif agentic_model == "cpm_explore":
-            _reasoning_extra["max_output_tokens"] = min(_max_out, 16384)
-            _reasoning_extra["temperature"] = kwargs.get("temperature", 0.0) or 1.0
-        elif agentic_model == "cpm_report":
-            _reasoning_extra["max_extend_steps"] = kwargs.get("max_extend_steps", 5)
-            _reasoning_extra["max_retries"] = kwargs.get("max_retries", 3)
-            _reasoning_extra["hard_mode"] = kwargs.get("hard_mode", True)
-            _reasoning_extra["oracle_outline_path"] = kwargs.get("oracle_outline_path")
-            _reasoning_extra["max_passage_chars"] = kwargs.get("max_passage_chars", 4000)
-            _reasoning_extra["model_name"] = llm_model
-            _reasoning_extra["model_url"] = kwargs.get("model_url")
+    # ==================== Instantiate Agent + Controller ====================
+    # In multi-GPU mode neither the agent nor the controller is built in the main
+    # process; each worker spawns its own instances on its assigned GPU (see
+    # orchestration._init_worker).  Building them here would create unused LLM
+    # clients that are immediately torn down.
+    from orchestration import build_agent, build_controller
 
-        agent = model_class(
+    agent = None
+    controller = None
+    if num_gpus <= 1 and queries:
+        agent = build_agent(
+            agentic_model=agentic_model,
+            llm_model=llm_model,
             llm_client=kwargs.get("llm_client"),
-            retriever=kwargs.get("retriever"),
+            retriever=_retriever,
             max_iteration=kwargs.get("max_iteration", 100),
             seen_top_k=kwargs.get("seen_top_k", 5),
             verbose=verbose,
-            **_reasoning_extra,
+            search_tool=search_tool,
+            use_plan=kwargs.get("use_plan", False),
+            max_output_tokens_total=kwargs.get("max_output_tokens_total", 40000),
+            temperature=kwargs.get("temperature", 0.0),
+            max_extend_steps=kwargs.get("max_extend_steps", 5),
+            max_retries=kwargs.get("max_retries", 3),
+            hard_mode=kwargs.get("hard_mode", True),
+            oracle_outline_path=kwargs.get("oracle_outline_path"),
+            max_passage_chars=kwargs.get("max_passage_chars", 4000),
         )
 
-        # Inject search tool into agents that inherit from BasicAgent
-        # (avoids modifying every subclass constructor)
-        if agent is not None and search_tool is not None and hasattr(agent, "search_tool"):
-            agent.search_tool = search_tool
-
-        # Inject controller into agents that inherit from BasicAgent
-        if agent is not None and controller is not None and hasattr(agent, "controller"):
-            from controller_component.prompts.answer_prompts import get_candidate_format
-
-            # Always set the canonical per-agent format on inference_config
-            _cfg = getattr(agent, "inference_config", None)
-            if _cfg is not None:
-                _cfg.format_instructions = get_candidate_format(agentic_model)
-
-            # Wire answer candidate generation through the agent (browsecomp_plus only)
-            if dataset == "browsecomp_plus" and agentic_model != "cpm_report":
-                if hasattr(agent, "generate_answer_candidate"):
-                    controller._answer_candidate_fn = agent.generate_answer_candidate
-                    _model_id = _cfg.model_name if _cfg else "unknown"
-                    print(f"Answer candidate via agent.generate_answer_candidate: {_model_id}")
-                else:
-                    pass
-
+        # Build the controller AFTER the agent so build_controller wires the
+        # per-agent answer format + answer-candidate generator through its
+        # constructor (no external private-attribute injection).
+        controller = build_controller(
+            controller_mode=_controller_mode,
+            retriever=_retriever,
+            qrels=qrels,
+            seen_top_k=kwargs.get("seen_top_k", 5),
+            llm_controller=kwargs.get("llm_controller"),
+            llm_intervene=kwargs.get("llm_intervene"),
+            agent=agent if hasattr(agent, "controller") else None,
+            agentic_model=agentic_model,
+            controller_history_window=kwargs.get("controller_history_window"),
+            controller_prompt_variant=kwargs.get("controller_prompt_variant", "nov_cov_sim"),
+            max_iteration=kwargs.get("max_iteration"),
+            criteria_coverage_mode=kwargs.get("criteria_coverage_mode", "dynamic"),
+            criteria_coverage_max_criteria=kwargs.get("criteria_coverage_max_criteria", 8),
+            llm_criteria_coverage=kwargs.get("llm_criteria_coverage"),
+            ac_temperature=kwargs.get("temperature", 0.0),
+            dataset=dataset,
+        )
+        if controller is not None and hasattr(agent, "controller"):
             agent.controller = controller
-
-    # (else: multi-GPU — agent loading deferred to worker processes)
 
     # ==================== Setup output dirs + evaluators ====================
     retrieval_evaluator, generation_evaluator, trajectory_evaluator, cited_doc_evaluator, seen_doc_evaluator, accuracy_evaluator, report_evaluator, controller_evaluator = build_evaluators(qrels, kwargs, answers=answers, questions=all_questions)
@@ -637,8 +603,6 @@ def _parse_args():
     )
 
     # ── Agent ──────────────────────────────────────────────────────
-    # --llm-model is intentionally NOT a CLI argument: the LLM is derived
-    # from --agentic-model via AGENTIC_MODEL_TO_LLM (see _parse_args tail).
     parser.add_argument("--agentic-model", type=str, default="glm", choices=list(AGENTIC_MODEL_TO_LLM), help="Agent to run; the LLM is selected automatically from the agent. cpm_report = Writing-as-Reasoning (report generation); searchr1/research/stepsearch/react/selfask/searcho1 = Reasoning-augmented retrieval; glm/oss_20b/oss_120b/tongyi = vendor-specific ReAct agents.")
     # ── LLM ────────────────────────────────────────────────────────────────
     parser.add_argument("--llm-temperature", type=float, default=0.0, help="Sampling temperature")
@@ -663,8 +627,8 @@ def _parse_args():
     parser.add_argument("--top-k", type=int, default=100, help="Documents to retrieve per search")
     parser.add_argument("--seen-top-k", type=int, default=5, help="Passages passed to planning/writing components. For cpm_report (=20): docs shown per search step. For webweaver(=10): docs added to memory bank per search (after interleaving multi-query results). For glm_agent and oss_agent (=5): docs shown per search step.")
     # ── Searcher Component ─────────────────────────────--------------------
-    parser.add_argument("--post-retrieval-reranker", type=str, default="null", choices=["null", "batched_reranker", "rankllama", "rank1", "qwen3_reranker"], help="Post-retrieval reranking mode: reranks each sub-query's doc list individually before fusion")
-    parser.add_argument("--post-fusion-reranker", type=str, default="null", choices=["null", "batched_reranker", "rankllama", "rank1", "qwen3_reranker"], help="Post-fusion reranking mode: reranks the fused list against the original query")
+    parser.add_argument("--post-retrieval-reranker", type=str, default="null", choices=["null", "batched_reranker", "rankllama", "rank1", "qwen3_reranker", "listwise", "rank_r1", "monot5"], help="Post-retrieval reranking mode: reranks each sub-query's doc list individually before fusion")
+    parser.add_argument("--post-fusion-reranker", type=str, default="null", choices=["null", "batched_reranker", "rankllama", "rank1", "qwen3_reranker", "listwise", "rank_r1", "monot5"], help="Post-fusion reranking mode: reranks the fused list against the original query")
     parser.add_argument("--rerank-top-k", type=int, default=100, help="Number of top documents to rerank (used by both post-retrieval and post-fusion rerankers)")
     parser.add_argument("--retrieval-input", type=str, default="subquery", choices=["subquery", "original_query+subquery", "reasoning+subquery"], help="Controls what text is sent to the retriever for each sub-query. 'subquery' (default) uses the raw sub-query; 'original_query+subquery' prepends the original query; 'reasoning+subquery' prepends current trajectory reasoning.")
     parser.add_argument("--post-fusion-reranker-input", type=str, default="original_query", choices=["original_query", "original_query+subqueries", "original_query+reasoning", "reasoning+subqueries"], help="Controls what text is sent to the post-fusion reranker. 'original_query' (default) uses the original query; 'original_query+subqueries' concatenates the original query with all current sub-queries; 'original_query+reasoning' appends current trajectory reasoning; 'reasoning+subqueries' concatenates current trajectory reasoning with all current sub-queries.")
@@ -683,7 +647,7 @@ def _parse_args():
     parser.add_argument("--llm-controller", type=str, default="claude-sonnet-4-6", help="LLM model for the controller policy (e.g. 'gpt-4.1-mini', 'claude-sonnet-4-6'). When set, overrides --llm-intervene for the controller policy. If not set, falls back to --llm-intervene.")
     parser.add_argument("--llm-intervene", type=str, default="claude-sonnet-4-6", help="LLM model for generating critical_thinking interventions (e.g. 'gpt-4.1-mini', 'claude-sonnet-4-6'). Required when --controller=action. Uses a lightweight LiteLLMClient separate from the agent's main LLM.")
     parser.add_argument("--controller-history-window", type=int, default=None, help="Number of recent signal/action history entries shown to the controller policy. None (default) means full history.")
-    parser.add_argument("--controller-prompt-variant", type=str, default="sim", choices=["nov", "nov_cov", "nov_sim", "nov_cov_sim", "sim", "cov_sim"], help="Controller policy prompt variant controlling which signals the controller sees. 'nov': novelty only. 'nov_cov': novelty + criteria coverage. 'nov_sim': novelty + consec_query_sim + orig_query_sim. 'nov_cov_sim': novelty + criteria coverage + consec_query_sim + orig_query_sim. 'sim': consec_query_sim (primary) + orig_query_sim (guardrail). 'cov_sim': criteria coverage (primary) + consec_query_sim + orig_query_sim (no novelty). Default: 'nov_cov_sim'.")
+    parser.add_argument("--controller-prompt-variant", type=str, default="nov_cov_sim", choices=["nov", "nov_cov", "nov_sim", "nov_cov_sim", "sim", "cov_sim"], help="Controller policy prompt variant controlling which signals the controller sees. 'nov': novelty only. 'nov_cov': novelty + criteria coverage. 'nov_sim': novelty + consec_query_sim + orig_query_sim. 'nov_cov_sim': novelty + criteria coverage + consec_query_sim + orig_query_sim. 'sim': consec_query_sim (primary) + orig_query_sim (guardrail). 'cov_sim': criteria coverage (primary) + consec_query_sim + orig_query_sim (no novelty). Default: 'nov_cov_sim'.")
     parser.add_argument("--criteria-coverage-mode", type=str, default=None, choices=["static", "dynamic"], help="Criteria coverage mode. 'static': criteria extracted from query text (e.g. BrowseCompPlus). 'dynamic': LLM decomposes query and updates criteria each iteration.")
     parser.add_argument("--criteria-coverage-max-criteria", type=int, default=8, help="Soft cap on the number of criteria tracked.")
     parser.add_argument("--llm-criteria-coverage", type=str, default="claude-sonnet-4-6", help="LLM model for criteria coverage evaluation. Falls back to --llm-controller if not set.")
@@ -749,10 +713,6 @@ def main():
             args.criteria_coverage_mode = "static"
         else:
             args.criteria_coverage_mode = "dynamic"
-
-    # ── Default controller prompt variant per dataset (user can override via CLI) ──
-    if args.controller_prompt_variant is None:
-        args.controller_prompt_variant = "nov_cov_sim"
 
     # ── Resolve --with-oracle-outline to an actual file path ─────────────
     if args.with_oracle_outline:
@@ -909,10 +869,10 @@ if __name__ == "__main__":
 #     └── summary.json
 #
 # 
-# CUDA_VISIBLE_DEVICES=5,6 python experiments/deep_research_agents/run_deepresearch_pipeline.py --dataset browsecomp_plus --limit 1
+# CUDA_VISIBLE_DEVICES=5,6 python experiments/run_dra_inference.py --dataset browsecomp_plus --limit 1
 #
-# CUDA_VISIBLE_DEVICES=0,1,2 python experiments/deep_research_agents/run_deepresearch_pipeline.py --dataset neuclir  --query-key topic_narrative --limit 1
-# python experiments/deep_research_agents/run_deepresearch_pipeline.py --dataset neuclir --num-gpus 6 --quiet --limit 6
-# python experiments/deep_research_agents/run_deepresearch_pipeline.py --dataset browsecomp_plus --eval-only --num-gpus 8 --quiet --eval-only --limit 12
+# CUDA_VISIBLE_DEVICES=0,1,2 python experiments/run_dra_inference.py --dataset neuclir  --query-key topic_narrative --limit 1
+# python experiments/run_dra_inference.py --dataset neuclir --num-gpus 6 --quiet --limit 6
+# python experiments/run_dra_inference.py --dataset browsecomp_plus --eval-only --num-gpus 8 --quiet --limit 12
 
 # --dataset neuclir --query-key topic_narrative

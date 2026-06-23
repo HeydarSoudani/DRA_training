@@ -1,4 +1,4 @@
-"""Controller classes for the trajectory tracker.
+"""Controller policy classes.
 
 Provides the abstract ``ControllerPolicy`` interface and the LLM-based
 implementation that selects continue/intervene/stop based on configurable
@@ -8,10 +8,10 @@ signal combinations (prompt variants).
 import json
 import logging
 from abc import ABC, abstractmethod
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .tracker_types import Decision
+from ._loader import load_prompt as _load_prompt
+from .types import Decision
 from .prompts.criteria_coverage import (
     CriteriaCoverageSummary,
     format_summary_for_controller,
@@ -25,13 +25,6 @@ _VALID_CONTROLLER_VARIANTS = {"nov", "nov_cov", "nov_sim", "nov_cov_sim", "sim",
 # ---------------------------------------------------------------------------
 # Load system prompts from disk
 # ---------------------------------------------------------------------------
-_PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
-
-
-def _load_prompt(filename: str) -> str:
-    return (_PROMPTS_DIR / filename).read_text(encoding="utf-8").strip()
-
-
 _CONTROLLER_SYSTEM_PROMPTS = {
     "nov": _load_prompt("controller/nov.txt"),
     "nov_cov": _load_prompt("controller/nov_cov.txt"),
@@ -49,14 +42,10 @@ from .prompts.controller.user_prompt import CONTROLLER_USER_TEMPLATES as _CONTRO
 # ---------------------------------------------------------------------------
 
 class ControllerPolicy(ABC):
-    reward_signal: Optional[str] = None
-
     @abstractmethod
     def decide(
         self, signals: Dict[str, Optional[float]], iter_num: int, **kwargs: Any,
     ) -> Decision: ...
-
-    def update(self, reward: float) -> None: ...
 
     @abstractmethod
     def reset(self) -> None: ...
@@ -79,11 +68,10 @@ class LLMControllerPolicy(ControllerPolicy):
     - ``"cov_sim"``: criteria_coverage (primary) + consec_query_sim + orig_query_sim
     """
 
-    def __init__(self, llm_client: Any, n_last_turns: Optional[int] = 3, controller_prompt_variant: str = "nov_cov_sim", history_window: Optional[int] = None, max_iteration: Optional[int] = None) -> None:
+    def __init__(self, llm_client: Any, controller_prompt_variant: str = "nov_cov_sim", history_window: Optional[int] = None, max_iteration: Optional[int] = None) -> None:
         if controller_prompt_variant not in _VALID_CONTROLLER_VARIANTS:
             raise ValueError(f"Unknown controller_prompt_variant: {controller_prompt_variant!r}. Must be one of {sorted(_VALID_CONTROLLER_VARIANTS)}")
         self._llm = llm_client
-        self._n_last_turns = n_last_turns
         self._controller_prompt_variant = controller_prompt_variant
         self._history_window = history_window
         self._max_iteration = max_iteration

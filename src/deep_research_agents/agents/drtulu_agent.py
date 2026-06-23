@@ -104,7 +104,7 @@ class UnifiedToolCallParserV20250824(ToolCallParser):
 from utils.llm_client import LiteLLMClient              # noqa: E402
 
 from .base_agent import BasicAgent                                                           # noqa: E402
-from controller_component import TrackerCriticalThinkResult, TrackerEarlyStopResult  # noqa: E402
+from deep_research_agents.agent_tools.controller_results import CriticalThinkResult, EarlyStopResult  # noqa: E402
 from controller_component.prompts.answer_prompts import FINAL_ANSWER_INSTRUCTION, DRTULU_FORMAT
 from utils.text_utils import format_as_snippets                                          # noqa: E402
 
@@ -271,7 +271,7 @@ class DrTulu_Agent(BasicAgent):
         reasoning_path: List[Dict[str, Any]] = []
         snippet_offset: int = 0    # running counter for globally-unique snippet IDs
         full_generation: str = ""  # accumulated assistant text for answer extraction
-        tracker_result = None
+        controller_result = None
 
         self._print(f"Query: {query}")
 
@@ -361,23 +361,23 @@ class DrTulu_Agent(BasicAgent):
                 matched_tool, tool_query, tool_info.parameters, snippet_offset,
                 reasoning=think_text if think_text else None,
             )
-            # Trajectory tracker: may inject observation, critical_think, or early stop
+            # Trajectory controller: may inject observation, critical_think, or early stop
             seen_docs = docs[:self.seen_top_k]
-            tracker_result = self.post_search_evaluate(
+            controller_result = self.post_search_evaluate(
                 subquery=tool_query or "", docs=seen_docs,
                 iter_num=iter_num, original_query=query,
                 thinking=think_text,
                 seen_docs=seen_docs,
                 trajectory=messages,
             )
-            _early_stop_triggered = isinstance(tracker_result, TrackerEarlyStopResult)
+            _early_stop_triggered = isinstance(controller_result, EarlyStopResult)
             if _early_stop_triggered:
                 pass  # keep original tool_output_xml
-            elif isinstance(tracker_result, TrackerCriticalThinkResult):
+            elif isinstance(controller_result, CriticalThinkResult):
                 tool_output_xml += (
                     f"\n<tool_output>\n"
-                    f"[Critical Redirect — {tracker_result.critical_search_query}]\n"
-                    f"{tracker_result.critical_observation}\n"
+                    f"[Critical Redirect — {controller_result.critical_search_query}]\n"
+                    f"{controller_result.critical_observation}\n"
                     f"</tool_output>"
                 )
 
@@ -393,8 +393,8 @@ class DrTulu_Agent(BasicAgent):
                 ],
                 "tokens":            self._step_tokens(),
             })
-            if isinstance(tracker_result, TrackerCriticalThinkResult):
-                entry = self._critical_think_to_reasoning_entry(tracker_result)
+            if isinstance(controller_result, CriticalThinkResult):
+                entry = self._critical_think_to_reasoning_entry(controller_result)
                 entry["tool_name"] = matched_tool
                 reasoning_path.append(entry)
 
@@ -415,7 +415,7 @@ class DrTulu_Agent(BasicAgent):
             and reasoning_path[-1].get("action_type") == "search"
         )
         if last_step_was_search:
-            is_early_stop = isinstance(tracker_result, TrackerEarlyStopResult) if tracker_result else False
+            is_early_stop = isinstance(controller_result, EarlyStopResult) if controller_result else False
             if is_early_stop:
                 self._vprint(len(reasoning_path) + 1, "force-answer", "Early stopping triggered, forcing final answer")
             else:

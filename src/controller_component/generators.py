@@ -1,4 +1,4 @@
-"""Critical thinking and answer candidate generators for the trajectory tracker.
+"""Critical thinking and answer candidate generators for the controller component.
 
 Provides generators that produce:
 - Critical thinking outputs (intervention queries when trajectory is stale)
@@ -9,10 +9,10 @@ import copy
 import json
 import logging
 import re
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from .tracker_types import CriticalThinkingOutput, TrajectoryContext
+from ._loader import load_prompt as _load_prompt
+from .types import CriticalThinkingOutput, TrajectoryContext
 from .prompts.answer_prompts import (
     CANDIDATE_GENERATION_INSTRUCTION,
     TAG_FORMAT,
@@ -25,13 +25,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Load prompt templates
 # ---------------------------------------------------------------------------
-_PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
-
-
-def _load_prompt(filename: str) -> str:
-    return (_PROMPTS_DIR / filename).read_text(encoding="utf-8").strip()
-
-
 _CRITICAL_THINKING_SYSTEM = _load_prompt("critical_thinking/system_prompt.txt")
 
 from .prompts.critical_thinking.user_prompt import CRITICAL_THINKING_USER_TEMPLATE as _CRITICAL_THINKING_USER_TEMPLATE
@@ -65,51 +58,8 @@ class LLMCriticalThinkingGenerator(CriticalThinkingGenerator):
     can fall back to a fixed notice.
     """
 
-    def __init__(self, llm_client: Any, n_last_turns: Optional[int] = 10) -> None:
+    def __init__(self, llm_client: Any) -> None:
         self._llm = llm_client
-        self._n_last_turns = n_last_turns
-
-    @staticmethod
-    def _build_coverage_section(ac_data: Optional[Dict[str, Any]]) -> str:
-        """Format covered, critical-gap, and minor-gap criteria into a prompt section."""
-        if ac_data is None:
-            return ""
-
-        criteria = ac_data.get("criteria", [])
-        covered = [a["name"] for a in criteria if a.get("status") == "covered"]
-        critical = ac_data.get("critical_gaps", [])
-        minor = ac_data.get("minor_gaps", [])
-
-        if not covered and not critical and not minor:
-            return ""
-
-        total = ac_data.get("total", len(criteria))
-        num_covered = ac_data.get("num_covered", len(covered))
-        num_partial = ac_data.get("num_partial", len(minor))
-        num_not_covered = ac_data.get("num_not_covered", len(critical))
-
-        parts = [
-            f"Overall: {num_covered}/{total} covered, "
-            f"{num_partial}/{total} partial, "
-            f"{num_not_covered}/{total} not covered"
-        ]
-        if covered:
-            bullet_list = "\n".join(f"- {name}" for name in covered)
-            parts.append(
-                f"Covered criteria (already have strong evidence — do NOT target these):\n{bullet_list}"
-            )
-        if critical:
-            bullet_list = "\n".join(f"- {name}" for name in critical)
-            parts.append(
-                f"Critical gaps (no evidence found — highest priority):\n{bullet_list}"
-            )
-        if minor:
-            bullet_list = "\n".join(f"- {name}" for name in minor)
-            parts.append(
-                f"Minor gaps (partial evidence — could be strengthened):\n{bullet_list}"
-            )
-
-        return "\n== Criteria Coverage ==\n" + "\n\n".join(parts) + "\n"
 
     def generate(self, context: TrajectoryContext) -> CriticalThinkingOutput:
         turn_lines = []

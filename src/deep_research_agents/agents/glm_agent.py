@@ -360,10 +360,10 @@ class GLM_Agent(BasicAgent):
             if not function_calls:
                 break
 
-            # Process function calls — evaluate tracker per query
+            # Process function calls — evaluate controller per query
             n_searches = sum(1 for fc in function_calls if fc["name"] == "search")
             last_search_msg_idx: Optional[int] = None
-            _first_tracker_action = None
+            _first_controller_action = None
             _stop_tracking = False
 
             for idx, tc in enumerate(function_calls):
@@ -424,14 +424,14 @@ class GLM_Agent(BasicAgent):
                     if tc["name"] == "search" and search_query:
                         last_search_msg_idx = len(messages) - 1
 
-                        # Per-query tracker: stop evaluating after first non-continue
+                        # Per-query controller: stop evaluating after first non-continue
                         if not _stop_tracking:
                             _result, _stop_tracking = self._track_query(
                                 search_query, docs[:self.seen_top_k],
                                 query, cur_reasoning, messages, reasoning_path,
                             )
                             if _result is not None:
-                                _first_tracker_action = _result
+                                _first_controller_action = _result
 
                 except Exception as e:
                     error_msg = f"Error executing {tc.get('name', 'unknown')}: {e}"
@@ -440,10 +440,10 @@ class GLM_Agent(BasicAgent):
                         tc.get("id", ""), error_msg,
                     ))
 
-            # Apply the first non-continue tracker action
-            if _first_tracker_action is not None:
-                if self._apply_tracker_action(
-                    _first_tracker_action, messages, reasoning_path, last_search_msg_idx,
+            # Apply the first non-continue controller action
+            if _first_controller_action is not None:
+                if self._apply_controller_action(
+                    _first_controller_action, messages, reasoning_path, last_search_msg_idx,
                     original_query=query,
                 ):
                     _early_stop = True

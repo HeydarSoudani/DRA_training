@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from pydantic import BaseModel, Field
 
-from utils.llm_client import LiteLLMClient, get_litellm_client
+from reasoner_component import LiteLLMClient, get_litellm_client
 from searcher_component.rerankers.prompts.relevance_scoring import (
     RERANK_RELEVANCE_SCORING_SYSTEM_PROMPT,
     get_rerank_relevance_scoring_user_prompt,
@@ -95,7 +95,7 @@ class BatchedLLMEvaluator:
     - Jinja2 templates for flexible prompt formatting
     """
 
-    def __init__( self, model: LiteLLMClient, thinking: str = "", reasoning: bool = False, template_path: Path = Path("./"), template_name: str = "relevance_scoring.jinja", max_chars_per_document: int = 4096, ):
+    def __init__( self, model: LiteLLMClient, thinking: str = "", reasoning: bool = False, template_path: Path = Path("./"), template_name: str = "relevance_scoring.jinja", max_chars_per_document: int = 4096, enable_selector: bool = False, selector_score_threshold: float = 3.0, selector_min_keep: int = 0, ):
         """Initialize the BatchedLLMEvaluator with a model.
 
         Args:
@@ -105,6 +105,13 @@ class BatchedLLMEvaluator:
             template_path: Path to Jinja2 template directory
             template_name: Name of the Jinja2 template file
             max_chars_per_document: Maximum characters per document to send to LLM
+            enable_selector: When True, ``rerank`` truncates its output to only the
+                documents whose ``rank_score`` clears ``selector_score_threshold``,
+                making the returned list length dynamic based on document quality.
+            selector_score_threshold: Minimum ``rank_score`` (inclusive, 0-5 scale)
+                for a document to survive selection. Default 3.0 keeps scores 3-5.
+            selector_min_keep: Lower bound on how many top-ranked docs to keep even
+                if they fall below the threshold (0 = no floor; may return empty).
         """
         self.model = model
         self.max_chars = max_chars_per_document
@@ -112,6 +119,28 @@ class BatchedLLMEvaluator:
         self.template_name = template_name
         self.thinking = thinking
         self.reasoning = reasoning
+        self.enable_selector = enable_selector
+        self.selector_score_threshold = selector_score_threshold
+        self.selector_min_keep = selector_min_keep
+
+    def _select( self, ranked: List[Dict[str, Any]], score_field: str = "rank_score", ) -> List[Dict[str, Any]]:
+        """Filter a ranked list to docs scoring >= ``selector_score_threshold``.
+
+        Order is preserved (the input is assumed already sorted by score). When
+        ``selector_min_keep`` is set, at least that many leading docs are retained
+        even if they fall below the threshold, so a fully-filtered list never drops
+        below the floor.
+        """
+        if not ranked:
+            return []
+        kept = [doc for doc in ranked if doc.get(score_field, 0.0) >= self.selector_score_threshold]
+        if len(kept) < self.selector_min_keep:
+            kept = ranked[: self.selector_min_keep]
+        logger.info(
+            "Reranker selector: %d → %d kept (threshold >= %s, min_keep=%d)",
+            len(ranked), len(kept), self.selector_score_threshold, self.selector_min_keep,
+        )
+        return kept
 
     def _get_prompt( self, query: str, data: List[Tuple[str, str]] ) -> Tuple[str, Dict[str, str]]:
         """Generate a prompt for the LLM based on the query and search results.
@@ -379,15 +408,22 @@ class BatchedLLMEvaluator:
         for doc_id, result in scores_dict.items():
             id_to_score[doc_id] = result.score
 
-        # Annotate and sort
+        # Annotate copies and sort (don't mutate the caller's dicts in place)
+        annotated: List[Dict[str, Any]] = []
         for doc in documents:
             doc_id = str(doc.get("doc_id") or doc.get("id") or "")
-            doc["rank_score"] = id_to_score.get(doc_id, 0.0)
+            doc_out = doc.copy()
+            doc_out["rank_score"] = id_to_score.get(doc_id, 0.0)
+            annotated.append(doc_out)
 
-        ranked = sorted(documents, key=lambda d: d.get("rank_score", 0.0), reverse=True)
+        ranked = sorted(annotated, key=lambda d: d.get("rank_score", 0.0), reverse=True)
 
         if top_k is not None:
             ranked = ranked[:top_k]
+
+        # Optional selector: drop low-relevance docs for a dynamic-length result.
+        if self.enable_selector:
+            ranked = self._select(ranked)
 
         return ranked
 
@@ -429,7 +465,7 @@ class BatchedLLMEvaluator:
 # ============================================================================
 
 
-def setup_batched_reranker( reranker_model: str, use_reranker: bool = True, temperature: float = 0.0, max_chars_per_document: int = 4096, thinking: str = "", reasoning: bool = False, template_path: Path = Path("./"), template_name: str = "relevance_scoring.jinja", metadata: Optional[Dict] = None, ) -> Optional[BatchedLLMEvaluator]:
+def setup_batched_reranker( reranker_model: str, use_reranker: bool = True, temperature: float = 0.0, max_chars_per_document: int = 4096, thinking: str = "", reasoning: bool = False, template_path: Path = Path("./"), template_name: str = "relevance_scoring.jinja", metadata: Optional[Dict] = None, enable_selector: bool = False, selector_score_threshold: float = 3.0, selector_min_keep: int = 0, ) -> Optional[BatchedLLMEvaluator]:
     """Setup batched LLM-based reranker if enabled.
 
     Args:
@@ -442,6 +478,10 @@ def setup_batched_reranker( reranker_model: str, use_reranker: bool = True, temp
         template_path: Path to Jinja2 template directory
         template_name: Name of the Jinja2 template file
         metadata: Optional metadata to attach to LLM calls
+        enable_selector: Enable the optional score-threshold selector (see
+            :class:`BatchedLLMEvaluator`) to return a dynamic-length list.
+        selector_score_threshold: Minimum ``rank_score`` to keep when selecting.
+        selector_min_keep: Minimum number of top docs to keep when selecting.
 
     Returns:
         BatchedLLMEvaluator instance if reranking is enabled, None otherwise
@@ -467,6 +507,9 @@ def setup_batched_reranker( reranker_model: str, use_reranker: bool = True, temp
         template_path=template_path,
         template_name=template_name,
         max_chars_per_document=max_chars_per_document,
+        enable_selector=enable_selector,
+        selector_score_threshold=selector_score_threshold,
+        selector_min_keep=selector_min_keep,
     )
     logger.info(f"Batched reranker configured: {reranker_model}")
     return reranker

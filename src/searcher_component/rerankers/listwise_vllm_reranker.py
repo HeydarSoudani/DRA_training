@@ -16,7 +16,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Union
 
-from openai import AzureOpenAI, OpenAI
+from reasoner_component import get_openai_client
 from rank_llm.data import Candidate, Query, Request, Result
 
 from .prompts import get_template
@@ -85,25 +85,17 @@ class ListwiseVLLMReranker:
         else:
             self.template = template
 
-        # Use AzureOpenAI when the endpoint is an Azure URL
-        if ".openai.azure.com" in api_url:
+        # get_openai_client returns an AzureOpenAI client for Azure endpoints,
+        # else a plain OpenAI client pointed at the vLLM server.
+        is_azure = ".openai.azure.com" in api_url
+        if is_azure:
             # Azure deployments use the model name without the "azure/" prefix
             self.model_name = model_name.removeprefix("azure/")
-            self._client = AzureOpenAI(
-                api_key=api_key,
-                azure_endpoint=api_url,
-                api_version=api_version or "2025-01-01-preview",
-            )
-            logger.info(
-                "ListwiseVLLMReranker (Azure): model=%s, endpoint=%s, api_version=%s, template=%s",
-                self.model_name, api_url, api_version, self.template.name,
-            )
-        else:
-            self._client = OpenAI(api_key=api_key, base_url=api_url)
-            logger.info(
-                "ListwiseVLLMReranker: model=%s, api_url=%s, template=%s",
-                model_name, api_url, self.template.name,
-            )
+        self._client = get_openai_client(api_url, api_key, api_version=api_version)
+        logger.info(
+            "ListwiseVLLMReranker%s: model=%s, api_url=%s, api_version=%s, template=%s",
+            " (Azure)" if is_azure else "", self.model_name, api_url, api_version, self.template.name,
+        )
 
     # ------------------------------------------------------------------
     # Text helpers

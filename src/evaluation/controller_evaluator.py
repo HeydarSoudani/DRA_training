@@ -153,9 +153,10 @@ class ControllerEvaluator:
     # ------------------------------------------------------------------
 
     def evaluate(self, results: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-        """Compute aggregate tracker statistics over all queries.
+        """Compute aggregate controller statistics over all queries.
 
-        Looks for ``tracker_score_history`` in each result dict.
+        Looks for ``controller_score_history`` (legacy: ``tracker_score_history``)
+        in each result dict.
 
         Returns:
             Nested metrics dict with per-signal statistics.

@@ -7,7 +7,7 @@ from typing import Callable, Dict, List, Any, Optional, Union
 
 from utils.llm_client import LiteLLMClient
 from searcher_component import normalize_retrieval_response
-from controller_component import TrackerCriticalThinkDeferred, TrackerCriticalThinkResult, TrackerEarlyStopResult  # noqa: E501
+from deep_research_agents.agent_tools.controller_results import CriticalThinkDeferred, CriticalThinkResult, EarlyStopResult  # noqa: E501
 from controller_component.prompts.answer_prompts import (
     CANDIDATE_GENERATION_INSTRUCTION,
     FINAL_ANSWER_INSTRUCTION,
@@ -18,12 +18,12 @@ from controller_component.prompts.answer_prompts import (
 from utils.text_utils import passages2string, format_as_json  # noqa: F401 – re-exported for back-compat
 from utils.text_utils import reduce_reasoning_path, build_evidence_summary
 from utils.config import InferenceConfig
-from utils.text_utils import verbose_print, verbose_print_search_results, verbose_print_tracker  # noqa: F401
+from utils.text_utils import verbose_print, verbose_print_search_results, verbose_print_controller  # noqa: F401
 from utils.text_utils import get_think as _get_think, get_query as _get_query, get_answer as _get_answer  # noqa: E501
 
 logger = logging.getLogger(__name__)
 
-_TrackerResult = Union[TrackerCriticalThinkDeferred, TrackerCriticalThinkResult, TrackerEarlyStopResult]
+_ControllerResult = Union[CriticalThinkDeferred, CriticalThinkResult, EarlyStopResult]
 
 
 class AgentVerboseMixin:
@@ -49,11 +49,11 @@ class AgentVerboseMixin:
         if self._is_verbose:
             verbose_print_search_results(iter_num, docs, agent_name=self._display_name, sub_iter=sub_iter)
 
-    def _vprint_tracker(self, iter_num: int, scores: dict, action: str, *, sub_iter: int = None) -> None:
+    def _vprint_controller(self, iter_num: int, scores: dict, action: str, *, sub_iter: int = None) -> None:
         if self._is_verbose:
-            verbose_print_tracker(iter_num, scores, action, agent_name=self._display_name, sub_iter=sub_iter)
+            verbose_print_controller(iter_num, scores, action, agent_name=self._display_name, sub_iter=sub_iter)
 
-    def _critical_think_to_reasoning_entry(self, ct: TrackerCriticalThinkResult, *, include_all_docs: bool = False) -> dict:
+    def _critical_think_to_reasoning_entry(self, ct: CriticalThinkResult, *, include_all_docs: bool = False) -> dict:
         seen_top_k = getattr(self, "seen_top_k", 5)
         entry = {
             "action_type": "critical_search",
@@ -68,7 +68,7 @@ class AgentVerboseMixin:
         return entry
 
     @staticmethod
-    def _format_critical_redirect_text(ct: TrackerCriticalThinkResult) -> str:
+    def _format_critical_redirect_text(ct: CriticalThinkResult) -> str:
         return (
             f"\n\n[Critical Redirect — {ct.critical_search_query}]\n"
             f"{ct.critical_observation}"
@@ -87,19 +87,19 @@ class AgentVerboseMixin:
         reasoning_path: Optional[List[Dict[str, Any]]] = None,
         defer_critical_search: bool = False,
         **kwargs,
-    ) -> Optional[_TrackerResult]:
+    ) -> Optional[_ControllerResult]:
         """Evaluate a search step via the controller.
 
-        Returns None (continue), TrackerCriticalThinkResult (inject notice),
-        TrackerCriticalThinkDeferred (deferred intervene), or TrackerEarlyStopResult.
+        Returns None (continue), CriticalThinkResult (inject notice),
+        CriticalThinkDeferred (deferred intervene), or EarlyStopResult.
         """
-        tracker = getattr(self, "controller", None)
-        if tracker is None:
+        controller = getattr(self, "controller", None)
+        if controller is None:
             if seen_docs is not None:
                 self._vprint_docs(iter_num, seen_docs, sub_iter=sub_iter)
             return None
 
-        decision = tracker.evaluate(
+        decision = controller.evaluate(
             subquery=subquery, docs=docs, original_query=original_query or "",
             iter_num=iter_num, thinking=thinking, trajectory=trajectory,
             reasoning_path=reasoning_path, **kwargs,
@@ -113,42 +113,42 @@ class AgentVerboseMixin:
         if self._is_verbose:
             if seen_docs is not None:
                 self._vprint_docs(iter_num, seen_docs, sub_iter=sub_iter)
-            self._vprint_tracker(iter_num, decision.scores, decision.action, sub_iter=sub_iter)
+            self._vprint_controller(iter_num, decision.scores, decision.action, sub_iter=sub_iter)
             if critical_think_triggered:
                 self._vprint(iter_num, "notice",
                     f"[{decision.action}] critical_think" + (" (deferred)" if defer_critical_search else ""),
                     sub_iter=sub_iter)
 
         if critical_think_triggered:
-            pno = decision.critical_thinking_output
+            critical_output = decision.critical_thinking_output
             if defer_critical_search:
-                return TrackerCriticalThinkDeferred(
-                    critical_think=pno.reasoning, critical_search_query=pno.search_query,
+                return CriticalThinkDeferred(
+                    critical_think=critical_output.reasoning, critical_search_query=critical_output.search_query,
                     scores=decision.scores, iter_num=iter_num,
                 )
             retrieve_fn = getattr(self, "retrieve_documents", None)
             if retrieve_fn is None:
-                logger.warning("Tracker critical_think requested but no retriever available")
+                logger.warning("Controller critical_think requested but no retriever available")
                 return None
             critical_think_iter = iter_num + 1
             self._notify_progress("critical_think", critical_think_iter)
-            critical_docs = retrieve_fn(pno.search_query, original_query=original_query)
+            critical_docs = retrieve_fn(critical_output.search_query, original_query=original_query)
             self._notify_progress("critical_search", critical_think_iter)
             seen_top_k = getattr(self, "seen_top_k", 5)
             critical_observation = passages2string(critical_docs[:seen_top_k])
             if self._is_verbose:
-                self._vprint(critical_think_iter, "critical think", pno.reasoning or "(no reasoning)", sub_iter=sub_iter)
-                self._vprint(critical_think_iter, "critical search", pno.search_query, sub_iter=sub_iter)
+                self._vprint(critical_think_iter, "critical think", critical_output.reasoning or "(no reasoning)", sub_iter=sub_iter)
+                self._vprint(critical_think_iter, "critical search", critical_output.search_query, sub_iter=sub_iter)
                 self._vprint_docs(critical_think_iter, critical_docs[:seen_top_k], sub_iter=sub_iter)
-            critical_think_decision = tracker.evaluate(
-                subquery=pno.search_query, docs=critical_docs[:seen_top_k],
+            critical_think_decision = controller.evaluate(
+                subquery=critical_output.search_query, docs=critical_docs[:seen_top_k],
                 original_query=original_query or "", iter_num=critical_think_iter,
-                thinking=pno.reasoning, trajectory=trajectory, reasoning_path=reasoning_path,
+                thinking=critical_output.reasoning, trajectory=trajectory, reasoning_path=reasoning_path,
             )
             if self._is_verbose:
-                self._vprint_tracker(critical_think_iter, critical_think_decision.scores, critical_think_decision.action, sub_iter=sub_iter)
-            return TrackerCriticalThinkResult(
-                critical_think=pno.reasoning, critical_search_query=pno.search_query,
+                self._vprint_controller(critical_think_iter, critical_think_decision.scores, critical_think_decision.action, sub_iter=sub_iter)
+            return CriticalThinkResult(
+                critical_think=critical_output.reasoning, critical_search_query=critical_output.search_query,
                 critical_docs=critical_docs, critical_observation=critical_observation,
                 critical_think_scores=critical_think_decision.scores, critical_think_iter=critical_think_iter,
             )
@@ -157,23 +157,23 @@ class AgentVerboseMixin:
         if early_stop is not None:
             if self._is_verbose:
                 self._vprint(iter_num, "notice", f"[{decision.action}] early_stopping", sub_iter=sub_iter)
-            return TrackerEarlyStopResult(reasoning=early_stop.reasoning, scores=decision.scores)
+            return EarlyStopResult(reasoning=early_stop.reasoning, scores=decision.scores)
 
         return None
 
     def _execute_deferred_critical_search(
         self,
-        deferred: TrackerCriticalThinkDeferred,
+        deferred: CriticalThinkDeferred,
         original_query: str,
         trajectory: Any = None,
         reasoning_path: Optional[List[Dict[str, Any]]] = None,
-    ) -> Optional[TrackerCriticalThinkResult]:
+    ) -> Optional[CriticalThinkResult]:
         """Execute a deferred critical search and return the full result."""
         retrieve_fn = getattr(self, "retrieve_documents", None)
         if retrieve_fn is None:
-            logger.warning("Tracker critical_think requested but no retriever available")
+            logger.warning("Controller critical_think requested but no retriever available")
             return None
-        tracker = getattr(self, "controller", None)
+        controller = getattr(self, "controller", None)
         critical_think_iter = deferred.iter_num + 1
         self._notify_progress("critical_think", critical_think_iter)
         critical_docs = retrieve_fn(deferred.critical_search_query, original_query=original_query)
@@ -185,26 +185,26 @@ class AgentVerboseMixin:
             self._vprint(critical_think_iter, "critical search", deferred.critical_search_query)
             self._vprint_docs(critical_think_iter, critical_docs[:seen_top_k])
         critical_think_scores = {}
-        if tracker is not None:
-            critical_think_decision = tracker.evaluate(
+        if controller is not None:
+            critical_think_decision = controller.evaluate(
                 subquery=deferred.critical_search_query, docs=critical_docs[:seen_top_k],
                 original_query=original_query, iter_num=critical_think_iter,
                 thinking=deferred.critical_think, trajectory=trajectory, reasoning_path=reasoning_path,
             )
             critical_think_scores = critical_think_decision.scores
             if self._is_verbose:
-                self._vprint_tracker(critical_think_iter, critical_think_scores, critical_think_decision.action)
-        return TrackerCriticalThinkResult(
+                self._vprint_controller(critical_think_iter, critical_think_scores, critical_think_decision.action)
+        return CriticalThinkResult(
             critical_think=deferred.critical_think, critical_search_query=deferred.critical_search_query,
             critical_docs=critical_docs, critical_observation=critical_observation,
             critical_think_scores=critical_think_scores, critical_think_iter=critical_think_iter,
         )
 
-    def _reset_tracker(self, query_id: Optional[str] = None) -> None:
+    def _reset_controller(self, query_id: Optional[str] = None) -> None:
         self._search_step = 0
-        tracker = getattr(self, "controller", None)
-        if tracker is not None:
-            tracker.reset(query_id=query_id)
+        controller = getattr(self, "controller", None)
+        if controller is not None:
+            controller.reset(query_id=query_id)
 
     def _attach_controller_stats(self, result: dict) -> None:
         controller = getattr(self, "controller", None)
@@ -776,7 +776,7 @@ class BasicAgent(AgentVerboseMixin):
         self._status_callback = status_callback
         self._search_iter     = 0
         # Reset controller for this query (loads per-query qrels)
-        self._reset_tracker(query_id=query_id)
+        self._reset_controller(query_id=query_id)
         # Snapshot token usage so we can report per-query totals.
         _meter = self._token_meter()
         _tok_start = _meter.snapshot() if _meter is not None else None
@@ -895,7 +895,7 @@ class BasicAgent(AgentVerboseMixin):
             return True, True
         return False, False
 
-    def _evaluate_and_handle_tracker(
+    def _evaluate_and_handle_controller(
         self,
         all_subqueries: List[str],
         all_seen_docs: List[Dict[str, Any]],
@@ -906,7 +906,7 @@ class BasicAgent(AgentVerboseMixin):
         reasoning_path: List[Dict[str, Any]],
         last_search_msg_idx: Optional[int],
     ) -> tuple:
-        """Post-search tracker evaluation with aggregated data.
+        """Post-search controller evaluation with aggregated data.
 
         Handles both early-stop and critical-think results. For critical
         think, appends redirect text to the last search result message and
@@ -916,7 +916,7 @@ class BasicAgent(AgentVerboseMixin):
             (early_stop_triggered: bool, extra_iterations: int)
         """
         seen_docs_dedup = self.get_unique_docs(all_seen_docs)
-        tracker_result = self.post_search_evaluate(
+        controller_result = self.post_search_evaluate(
             subquery=all_subqueries,
             docs=seen_docs_dedup,
             iter_num=iteration, original_query=query,
@@ -925,23 +925,23 @@ class BasicAgent(AgentVerboseMixin):
             trajectory=messages,
             reasoning_path=reasoning_path,
         )
-        if isinstance(tracker_result, TrackerEarlyStopResult):
+        if isinstance(controller_result, EarlyStopResult):
             return True, 0
-        if isinstance(tracker_result, TrackerCriticalThinkResult):
+        if isinstance(controller_result, CriticalThinkResult):
             if last_search_msg_idx is not None:
                 msg = messages[last_search_msg_idx]
                 content_key = "output" if "output" in msg else "content"
-                msg[content_key] += self._format_critical_redirect_text(tracker_result)
+                msg[content_key] += self._format_critical_redirect_text(controller_result)
             ct_entry = self._critical_think_to_reasoning_entry(
-                tracker_result, include_all_docs=True,
+                controller_result, include_all_docs=True,
             )
-            ct_entry["iteration"] = tracker_result.critical_think_iter
+            ct_entry["iteration"] = controller_result.critical_think_iter
             reasoning_path.append(ct_entry)
             return False, 1
         return False, 0
 
     # ------------------------------------------------------------------
-    # Per-query tracker helpers
+    # Per-query controller helpers
     # ------------------------------------------------------------------
 
     def _track_query(
@@ -953,23 +953,23 @@ class BasicAgent(AgentVerboseMixin):
         messages: List[Any],
         reasoning_path: List[Dict[str, Any]],
     ) -> tuple:
-        """Evaluate the tracker for a single search query.
+        """Evaluate the controller for a single search query.
 
         Increments ``_search_step`` and calls ``post_search_evaluate`` with
         ``defer_critical_search=True`` so that an "intervene" decision
-        returns a ``TrackerCriticalThinkDeferred`` without executing
+        returns a ``CriticalThinkDeferred`` without executing
         retrieval.  The actual critical search is executed later by
-        ``_apply_tracker_action`` after all sub-queries have completed.
+        ``_apply_controller_action`` after all sub-queries have completed.
 
         Returns:
-            (tracker_result, stop_evaluating) where *tracker_result* is the
-            actionable result (``TrackerCriticalThinkDeferred``,
-            ``TrackerEarlyStopResult``, or ``None``) and *stop_evaluating*
+            (controller_result, stop_evaluating) where *controller_result* is the
+            actionable result (``CriticalThinkDeferred``,
+            ``EarlyStopResult``, or ``None``) and *stop_evaluating*
             is ``True`` when the controller issued a non-continue action
             (even if no actionable result was produced).
         """
         self._search_step += 1
-        tracker_result = self.post_search_evaluate(
+        controller_result = self.post_search_evaluate(
             subquery=search_query,
             docs=seen_docs,
             iter_num=self._search_step,
@@ -981,25 +981,25 @@ class BasicAgent(AgentVerboseMixin):
             defer_critical_search=True,
         )
 
-        stop_evaluating = tracker_result is not None
+        stop_evaluating = controller_result is not None
         if not stop_evaluating:
-            tracker = getattr(self, "controller", None)
-            if tracker is not None and tracker.score_history:
-                last_action = tracker.score_history[-1].get("controller_action")
+            controller = getattr(self, "controller", None)
+            if controller is not None and controller.score_history:
+                last_action = controller.score_history[-1].get("controller_action")
                 if last_action and last_action != "continue":
                     stop_evaluating = True
 
-        return tracker_result, stop_evaluating
+        return controller_result, stop_evaluating
 
-    def _apply_tracker_action(
+    def _apply_controller_action(
         self,
-        tracker_result: Union[TrackerCriticalThinkDeferred, TrackerCriticalThinkResult, TrackerEarlyStopResult],
+        controller_result: Union[CriticalThinkDeferred, CriticalThinkResult, EarlyStopResult],
         messages: List[Any],
         reasoning_path: List[Dict[str, Any]],
         last_search_msg_idx: Optional[int],
         original_query: Optional[str] = None,
     ) -> bool:
-        """Apply a deferred tracker action after the tool-call loop.
+        """Apply a deferred controller action after the tool-call loop.
 
         For deferred critical-think: executes the critical search retrieval,
         then injects redirect text and appends the entry to reasoning_path.
@@ -1009,25 +1009,25 @@ class BasicAgent(AgentVerboseMixin):
 
         Returns True if early stop was triggered.
         """
-        if isinstance(tracker_result, TrackerEarlyStopResult):
+        if isinstance(controller_result, EarlyStopResult):
             return True
-        if isinstance(tracker_result, TrackerCriticalThinkDeferred):
-            tracker_result = self._execute_deferred_critical_search(
-                tracker_result, original_query or "",
+        if isinstance(controller_result, CriticalThinkDeferred):
+            controller_result = self._execute_deferred_critical_search(
+                controller_result, original_query or "",
                 trajectory=messages, reasoning_path=reasoning_path,
             )
-            if tracker_result is None:
+            if controller_result is None:
                 return False
             self._search_step += 1
-        if isinstance(tracker_result, TrackerCriticalThinkResult):
+        if isinstance(controller_result, CriticalThinkResult):
             if last_search_msg_idx is not None:
                 msg = messages[last_search_msg_idx]
                 content_key = "output" if "output" in msg else "content"
-                msg[content_key] += self._format_critical_redirect_text(tracker_result)
+                msg[content_key] += self._format_critical_redirect_text(controller_result)
             ct_entry = self._critical_think_to_reasoning_entry(
-                tracker_result, include_all_docs=True,
+                controller_result, include_all_docs=True,
             )
-            ct_entry["iteration"] = tracker_result.critical_think_iter
+            ct_entry["iteration"] = controller_result.critical_think_iter
             reasoning_path.append(ct_entry)
             return False
         return False
@@ -1308,7 +1308,7 @@ class TagReasoningAgent(BasicAgent):
                 search_results = passages2string(search_docs[:self.seen_top_k])
 
                 seen_docs = search_docs[:self.seen_top_k]
-                tracker_result = self.post_search_evaluate(
+                controller_result = self.post_search_evaluate(
                     subquery=tmp_query, docs=seen_docs,
                     iter_num=iter_num, original_query=question,
                     thinking=think_text or "",
@@ -1316,11 +1316,11 @@ class TagReasoningAgent(BasicAgent):
                     trajectory=input_prompt,
                     reasoning_path=reasoning_path,
                 )
-                if isinstance(tracker_result, TrackerEarlyStopResult):
-                    early_stop_result = tracker_result
+                if isinstance(controller_result, EarlyStopResult):
+                    early_stop_result = controller_result
             else:
                 search_docs, search_results = [], ''
-                tracker_result = None
+                controller_result = None
 
             reasoning_path.append({
                 'think': think_text,
@@ -1336,15 +1336,15 @@ class TagReasoningAgent(BasicAgent):
             if early_stop_result is not None:
                 break
 
-            if isinstance(tracker_result, TrackerCriticalThinkResult):
-                reasoning_path.append(self._critical_think_to_reasoning_entry(tracker_result))
+            if isinstance(controller_result, CriticalThinkResult):
+                reasoning_path.append(self._critical_think_to_reasoning_entry(controller_result))
                 critical_think_output = (
-                    f"<think>{tracker_result.critical_think}</think>\n"
-                    f"<search>{tracker_result.critical_search_query}</search>"
+                    f"<think>{controller_result.critical_think}</think>\n"
+                    f"<search>{controller_result.critical_search_query}</search>"
                 )
                 critical_think_text = self.curr_step_template.format(
                     output_text=critical_think_output,
-                    search_results=tracker_result.critical_observation,
+                    search_results=controller_result.critical_observation,
                 )
                 input_prompt += critical_think_text
             messages = self._build_messages(input_prompt)

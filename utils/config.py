@@ -102,6 +102,11 @@ def get_reranker_configs(rerank_top_k: int = 100) -> dict:
         "batched_reranker_config": {
             "reranker_model": "claude-sonnet-4-5",
             "max_chars_per_document": 4096,
+            # Optional score-threshold selector (dynamic-length output). Disabled
+            # by default; set enable_selector=True to keep only high-scoring docs.
+            "enable_selector": False,
+            "selector_score_threshold": 3.0,
+            "selector_min_keep": 0,
         },
         "rankllama_reranker_config": {
             "model_name": "castorini/rankllama-v1-7b-lora-passage",
@@ -127,6 +132,36 @@ def get_reranker_configs(rerank_top_k: int = 100) -> dict:
             "batch_size": 32,
             "top_k": rerank_top_k,
             "enable_thinking": False,
+        },
+        "listwise_reranker_config": {
+            "model_name": "castorini/rank_zephyr_7b_v1_full",
+            "api_url": "http://localhost:8000/v1",
+            "api_key": "EMPTY",
+            "template": "rankzephyr",
+            "top_k": rerank_top_k,
+            "window_size": 20,
+            "stride": 10,
+            "use_sliding_window": True,
+            "max_passage_words": 300,
+            "max_tokens": 200,
+            "temperature": 0.0,
+            "enable_thinking": False,
+        },
+        "rank_r1_reranker_config": {
+            "api_url": "http://localhost:8001/v1",
+            "api_model_name": "rank-r1",
+            "api_key": "EMPTY",
+            "num_child": 19,
+            "k": 10,
+            "max_tokens": 2048,
+            "top_k": rerank_top_k,
+            "context_size": 450,
+        },
+        "monot5_reranker_config": {
+            "model_name": "castorini/monot5-base-msmarco",
+            "use_mt5": False,
+            "batch_size": 32,
+            "top_k": rerank_top_k,
         },
     }
 

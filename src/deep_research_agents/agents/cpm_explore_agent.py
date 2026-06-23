@@ -688,7 +688,7 @@ class CPMExplore(BasicAgent):
             no_op_count = 0
             n_searches = sum(1 for tc in all_tool_calls if tc["function"]["name"] == "search")
             last_search_msg_idx: Optional[int] = None
-            _first_tracker_action = None
+            _first_controller_action = None
             _stop_tracking = False
 
             for idx, tool_call in enumerate(all_tool_calls):
@@ -750,14 +750,14 @@ class CPMExplore(BasicAgent):
                     if tname == "search" and search_query:
                         last_search_msg_idx = len(messages) - 1
 
-                        # Per-query tracker: stop evaluating after first non-continue
+                        # Per-query controller: stop evaluating after first non-continue
                         if not _stop_tracking:
                             _result, _stop_tracking = self._track_query(
                                 search_query, docs[:self.seen_top_k],
                                 query, current_thinking, messages, reasoning_path,
                             )
                             if _result is not None:
-                                _first_tracker_action = _result
+                                _first_controller_action = _result
 
                 except Exception as e:
                     error_msg = f"Error executing {tname}: {e}"
@@ -769,10 +769,10 @@ class CPMExplore(BasicAgent):
                         ),
                     })
 
-            # Apply the first non-continue tracker action
-            if _first_tracker_action is not None:
-                if self._apply_tracker_action(
-                    _first_tracker_action, messages, reasoning_path, last_search_msg_idx,
+            # Apply the first non-continue controller action
+            if _first_controller_action is not None:
+                if self._apply_controller_action(
+                    _first_controller_action, messages, reasoning_path, last_search_msg_idx,
                     original_query=query,
                 ):
                     _early_stop = True

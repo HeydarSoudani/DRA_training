@@ -26,7 +26,7 @@ from utils.config import (
     get_reranker_configs,
     is_local_finetuned,
 )
-from utils.llm_client import LiteLLMClient, setup_llm_client
+from reasoner_component import create_generator
 from utils.text_utils import _build_cited_docs_ranked_list, build_references_section
 
 logger = logging.getLogger(__name__)
@@ -118,20 +118,20 @@ def build_controller(
     )
     from controller_component.prompts.answer_prompts import get_candidate_format
 
-    _tt_affect = "none" if controller_mode == "monitor" else "active"
+    _intervention_mode = "none" if controller_mode == "monitor" else "active"
 
-    _tt_notice_gen = None
+    _critical_thinking_gen = None
     if controller_mode == "action":
         if llm_intervene:
-            _tt_llm_client = LiteLLMClient(model=llm_intervene)
-            _tt_notice_gen = LLMCriticalThinkingGenerator(llm_client=_tt_llm_client)
+            _intervene_llm_client = create_generator(llm_intervene, backend="api")
+            _critical_thinking_gen = LLMCriticalThinkingGenerator(llm_client=_intervene_llm_client)
         elif strict:
             raise ValueError("--llm-intervene is required when using intervene action")
 
     _controller_policy = None
     _controller_llm_model = llm_controller or llm_intervene
     if _controller_llm_model:
-        _controller_llm_client = LiteLLMClient(model=_controller_llm_model)
+        _controller_llm_client = create_generator(_controller_llm_model, backend="api")
         _controller_policy = LLMControllerPolicy(llm_client=_controller_llm_client, history_window=controller_history_window, controller_prompt_variant=controller_prompt_variant, max_iteration=max_iteration)
     elif controller_mode == "action" and strict:
         raise ValueError(
@@ -139,20 +139,13 @@ def build_controller(
             "when --controller=action"
         )
 
-    controller = Controller(
-        affect_mode=_tt_affect,
-        critical_thinking_generator=_tt_notice_gen,
-        encode_fn=encode_fn_from_retriever(retriever) if retriever else None,
-        qrels=qrels or {},
-        seen_top_k=seen_top_k,
-        controller_policy=_controller_policy,
-    )
-
+    # Criteria coverage signal (optional).
+    _criteria_coverage_signal = None
     _ac_llm_model = llm_criteria_coverage or llm_controller or llm_intervene
     if _ac_llm_model:
         from controller_component import CriteriaCoverageSignal
-        _ac_llm_client = LiteLLMClient(model=_ac_llm_model)
-        controller._criteria_coverage = CriteriaCoverageSignal(
+        _ac_llm_client = create_generator(_ac_llm_model, backend="api")
+        _criteria_coverage_signal = CriteriaCoverageSignal(
             llm_client=_ac_llm_client,
             mode=criteria_coverage_mode,
             max_criteria=criteria_coverage_max_criteria,
@@ -162,6 +155,8 @@ def build_controller(
     else:
         logger.warning("No LLM model available for criteria coverage; signal disabled")
 
+    # Answer candidate function (optional, sourced from the agent).
+    _answer_candidate_fn = None
     if agent is not None and agentic_model is not None:
         _cfg = getattr(agent, "inference_config", None)
         if _cfg is not None:
@@ -169,11 +164,95 @@ def build_controller(
 
         if dataset == "browsecomp_plus" and agentic_model != "cpm_report":
             if hasattr(agent, "generate_answer_candidate"):
-                controller._answer_candidate_fn = agent.generate_answer_candidate
+                _answer_candidate_fn = agent.generate_answer_candidate
                 _model_id = _cfg.model_name if _cfg else "unknown"
                 print(f"Answer candidate via agent.generate_answer_candidate: {_model_id}")
 
+    controller = Controller(
+        intervention_mode=_intervention_mode,
+        critical_thinking_generator=_critical_thinking_gen,
+        encode_fn=encode_fn_from_retriever(retriever) if retriever else None,
+        qrels=qrels or {},
+        seen_top_k=seen_top_k,
+        controller_policy=_controller_policy,
+        criteria_coverage_signal=_criteria_coverage_signal,
+        answer_candidate_fn=_answer_candidate_fn,
+    )
+
     return controller
+
+
+# ===========================================================================
+# Agent factory
+# ===========================================================================
+
+def build_agent(
+    agentic_model: str,
+    llm_model: str,
+    llm_client=None,
+    retriever=None,
+    *,
+    max_iteration: int = 100,
+    seen_top_k: int = 5,
+    verbose: bool = False,
+    search_tool=None,
+    use_plan: bool = False,
+    max_output_tokens_total: int = 40000,
+    temperature: float = 0.0,
+    max_extend_steps: int = 5,
+    max_retries: int = 3,
+    hard_mode: bool = True,
+    oracle_outline_path: Optional[str] = None,
+    max_passage_chars: int = 4000,
+):
+    """Instantiate an agent and attach its search tool.
+
+    Shared by both the main process (run_pipeline, single-GPU) and spawned GPU
+    workers (_init_worker) so the per-agent construction logic lives in one
+    place.
+
+    The agent-specific keyword arguments are assembled into ``_reasoning_extra``
+    based on ``agentic_model`` and forwarded to the agent constructor.
+    """
+    from deep_research_agents.agents import AGENT_MAP
+
+    model_class = AGENT_MAP[agentic_model]
+    _reasoning_extra: dict = {}
+    if use_plan and agentic_model == "react":
+        _reasoning_extra["use_plan"] = True
+    if agentic_model == "glm":
+        _reasoning_extra["max_output_tokens"] = min(max_output_tokens_total, 20000)
+    elif agentic_model == "oss":
+        _reasoning_extra["max_output_tokens"] = max_output_tokens_total
+        _reasoning_extra["model_name"] = f"openai/{llm_model}"
+    elif agentic_model == "tongyi":
+        _reasoning_extra["max_tokens_per_step"] = min(max_output_tokens_total, 20000)
+    elif agentic_model == "cpm_explore":
+        _reasoning_extra["max_output_tokens"] = min(max_output_tokens_total, 16384)
+        _reasoning_extra["temperature"] = temperature or 1.0
+    elif agentic_model == "cpm_report":
+        _reasoning_extra["max_extend_steps"] = max_extend_steps
+        _reasoning_extra["max_retries"] = max_retries
+        _reasoning_extra["hard_mode"] = hard_mode
+        _reasoning_extra["oracle_outline_path"] = oracle_outline_path
+        _reasoning_extra["max_passage_chars"] = max_passage_chars
+        _reasoning_extra["model_name"] = llm_model
+
+    agent = model_class(
+        llm_client=llm_client,
+        retriever=retriever,
+        max_iteration=max_iteration,
+        seen_top_k=seen_top_k,
+        verbose=verbose,
+        **_reasoning_extra,
+    )
+
+    # Inject search tool into agents that inherit from BasicAgent
+    # (avoids modifying every subclass constructor).
+    if search_tool is not None and hasattr(agent, "search_tool"):
+        agent.search_tool = search_tool
+
+    return agent
 
 
 # ===========================================================================
@@ -199,17 +278,22 @@ def _build_components_from_config(worker_config: dict):
     elif is_local_finetuned(agentic_model, llm_model):
         hf_model = llm_model
         api_base = os.getenv("VLLM_API_BASE", "http://127.0.0.1:6008/v1")
-        llm_client = LiteLLMClient(
-            model=f"openai/{hf_model}",
+        llm_client = create_generator(
+            hf_model,
+            backend="vllm",
             api_base=api_base,
             api_key="EMPTY",
+            litellm_prefix="openai",  # preserve model string "openai/<hf_model>"
             temperature=worker_config["llm_temperature"],
             max_tokens=worker_config["llm_max_tokens_per_call"],
             request_timeout=worker_config.get("request_timeout", 300),
         )
     else:
-        llm_client = setup_llm_client(
-            model_name=llm_model,
+        # Let create_generator infer the backend from the model name: an
+        # ``hf/``-prefixed (or registered) model routes to HFGenerator, ordinary
+        # slugs route to APIGenerator.
+        llm_client = create_generator(
+            llm_model,
             temperature=worker_config["llm_temperature"],
             top_p=worker_config["llm_top_p"],
             max_completion_tokens=worker_config["llm_max_tokens_per_call"],
@@ -326,43 +410,25 @@ def _init_worker(worker_id: int, worker_config: dict):
         )
 
     print(f"[Worker {worker_id}] Creating agent ({agentic_model})...", flush=True)
-    from deep_research_agents.agents import AGENT_MAP
     llm_model = worker_config["llm_model"]
-    model_class = AGENT_MAP[agentic_model]
-    _max_out = worker_config.get("max_output_tokens_total", 40000)
-    _reasoning_extra: dict = {}
-    if worker_config.get("use_plan", False) and agentic_model == "react":
-        _reasoning_extra["use_plan"] = True
-    if agentic_model == "glm":
-        _reasoning_extra["max_output_tokens"] = min(_max_out, 20000)
-    elif agentic_model == "oss":
-        _reasoning_extra["max_output_tokens"] = _max_out
-        _reasoning_extra["model_name"] = f"openai/{llm_model}"
-    elif agentic_model == "tongyi":
-        _reasoning_extra["max_tokens_per_step"] = min(_max_out, 20000)
-    elif agentic_model == "cpm_explore":
-        _reasoning_extra["max_output_tokens"] = min(_max_out, 16384)
-        _reasoning_extra["temperature"] = worker_config.get("temperature") or 1.0
-    elif agentic_model == "cpm_report":
-        _reasoning_extra["max_extend_steps"] = worker_config.get("max_extend_steps", 5)
-        _reasoning_extra["max_retries"] = worker_config.get("max_retries", 3)
-        _reasoning_extra["hard_mode"] = worker_config.get("hard_mode", True)
-        _reasoning_extra["oracle_outline_path"] = worker_config.get("oracle_outline_path")
-        _reasoning_extra["max_passage_chars"] = worker_config.get("max_passage_chars", 4000)
-        _reasoning_extra["model_name"] = llm_model
-        _reasoning_extra["model_url"] = worker_config.get("model_url")
-
-    agent = model_class(
+    agent = build_agent(
+        agentic_model=agentic_model,
+        llm_model=llm_model,
         llm_client=llm_client,
         retriever=retriever,
-        max_iteration=worker_config.get("max_iteration", 20),
+        max_iteration=worker_config.get("max_iteration", 100),
         seen_top_k=worker_config.get("seen_top_k", 5),
         verbose=verbose,
-        **_reasoning_extra,
+        search_tool=search_tool,
+        use_plan=worker_config.get("use_plan", False),
+        max_output_tokens_total=worker_config.get("max_output_tokens_total", 40000),
+        temperature=worker_config.get("temperature", 0.7),
+        max_extend_steps=worker_config.get("max_extend_steps", 5),
+        max_retries=worker_config.get("max_retries", 3),
+        hard_mode=worker_config.get("hard_mode", True),
+        oracle_outline_path=worker_config.get("oracle_outline_path"),
+        max_passage_chars=worker_config.get("max_passage_chars", 4000),
     )
-
-    if agent is not None and search_tool is not None and hasattr(agent, "search_tool"):
-        agent.search_tool = search_tool
 
     _controller_mode = worker_config.get("controller", "monitor")
     controller = build_controller(
@@ -420,10 +486,7 @@ def gpu_worker(worker_id: int, query_items: list, temp_dir_str: str, worker_conf
     from evaluation import SurfacedDocEvaluator, GenerationEvaluator, TrajectoryEvaluator, ControllerEvaluator, CitedDocEvaluator, SeenDocEvaluator
     _ret_eval        = SurfacedDocEvaluator(qrels={}, k_values=[])
     _gen_eval        = GenerationEvaluator()
-    _traj_eval       = TrajectoryEvaluator(
-        save_doc_text=worker_config.get("save_doc_text", True),
-        dedup_docs=worker_config.get("dedup_docs", True),
-    )
+    _traj_eval       = TrajectoryEvaluator()
     _controller_eval = ControllerEvaluator()
     _cited_eval      = CitedDocEvaluator(qrels={}, k_values=[])
     _seen_eval       = SeenDocEvaluator(qrels={}, k_values=[])

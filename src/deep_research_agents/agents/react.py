@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 from .base_agent import BasicAgent
 from deep_research_agents.agent_tools.react_tools import PlanTool
-from controller_component import TrackerCriticalThinkResult, TrackerEarlyStopResult
+from deep_research_agents.agent_tools.controller_results import CriticalThinkResult, EarlyStopResult
 from controller_component.prompts.answer_prompts import FINAL_ANSWER_INSTRUCTION, REACT_FORMAT
 from utils.text_utils import passages2string
 from utils.config import InferenceConfig
@@ -98,7 +98,7 @@ class ReActAgent(BasicAgent):
     def get_observation(self, action_type: str, action_entity: str) -> tuple:
         """Execute an action and return its observation.
 
-        Tracker evaluation is handled by the main loop, not here.
+        Controller evaluation is handled by the main loop, not here.
 
         Returns:
             (docs, obs, done)
@@ -220,7 +220,7 @@ class ReActAgent(BasicAgent):
 
         consecutive_parse_errors = 0
         max_consecutive_parse_errors = 3
-        early_stop_result: Optional[TrackerEarlyStopResult] = None
+        early_stop_result: Optional[EarlyStopResult] = None
 
         self._print(f"Query: {query}")
 
@@ -356,9 +356,9 @@ class ReActAgent(BasicAgent):
                         "tokens": self._step_tokens(),
                     })
 
-                # Trajectory tracker: evaluate after each search
+                # Trajectory controller: evaluate after each search
                 if docs is not None:
-                    tracker_result = self.post_search_evaluate(
+                    controller_result = self.post_search_evaluate(
                         subquery=action_entity,
                         docs=docs[:self.seen_top_k],
                         iter_num=display_iter,
@@ -371,29 +371,29 @@ class ReActAgent(BasicAgent):
                         ],
                         reasoning_path=reasoning_path,
                     )
-                    if isinstance(tracker_result, TrackerEarlyStopResult):
-                        early_stop_result = tracker_result
+                    if isinstance(controller_result, EarlyStopResult):
+                        early_stop_result = controller_result
                         done = True
-                    elif isinstance(tracker_result, TrackerCriticalThinkResult):
-                        self.retrieved_docs.extend(tracker_result.critical_docs)
+                    elif isinstance(controller_result, CriticalThinkResult):
+                        self.retrieved_docs.extend(controller_result.critical_docs)
                         self.history.append({
-                            "iter": tracker_result.critical_think_iter,
-                            "thought": tracker_result.critical_think,
+                            "iter": controller_result.critical_think_iter,
+                            "thought": controller_result.critical_think,
                             "action": "critical_search",
-                            "value": tracker_result.critical_search_query,
-                            "observation": tracker_result.critical_observation,
+                            "value": controller_result.critical_search_query,
+                            "observation": controller_result.critical_observation,
                             "is_critical_think": True,
                         })
                         ct_entry = self._critical_think_to_reasoning_entry(
-                            tracker_result, include_all_docs=True,
+                            controller_result, include_all_docs=True,
                         )
-                        ct_entry["iteration"] = tracker_result.critical_think_iter
+                        ct_entry["iteration"] = controller_result.critical_think_iter
                         reasoning_path.append(ct_entry)
                         if not self.use_plan:
                             ct_step = self.current_step_template.format(
-                                think=tracker_result.critical_think,
-                                action_text=f'search(query="{tracker_result.critical_search_query}")',
-                                observation=tracker_result.critical_observation,
+                                think=controller_result.critical_think,
+                                action_text=f'search(query="{controller_result.critical_search_query}")',
+                                observation=controller_result.critical_observation,
                             )
                             input_prompt += ct_step + "\n"
 

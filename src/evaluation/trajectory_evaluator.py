@@ -93,49 +93,16 @@ def _get_num_docs(step: Dict[str, Any]) -> int:
     return 0
 
 
-# Heavy/stable per-doc fields that are identical every time a doc is surfaced.
-# These are hoisted into a single per-file ``documents`` pool (keyed by doc_id)
-# so the text is stored once instead of once per step that re-surfaces the doc.
-_DOC_POOL_FIELDS = ("title", "contents", "text", "metadata")
-# Text fields dropped entirely when ``save_doc_text`` is False.
-_DOC_TEXT_FIELDS = ("contents", "text")
-
-
-def _clean_doc_for_save(doc: Dict[str, Any]) -> Dict[str, Any]:
-    """Strip redundant fields from a single retrieved-doc dict.
-
-    Removes:
-    - ``_emb`` — embedding vectors (huge, never needed on disk).
-    - ``relevant_text`` — a verbatim copy of ``contents`` (every reader falls
-      back to ``contents``, so this is pure duplication).
-    - ``id`` when ``doc_id`` is also present.
-    - ``metadata.title`` when it duplicates the top-level ``title``.
-    """
-    cleaned = {
-        k: v for k, v in doc.items()
-        if k != "_emb"
-        and k != "relevant_text"
-        and not (k == "id" and "doc_id" in doc)
-    }
-    # Drop metadata entirely if its only content duplicates the top-level title.
-    meta = cleaned.get("metadata")
-    if isinstance(meta, dict):
-        meta = {k: v for k, v in meta.items()
-                if not (k == "title" and v == cleaned.get("title"))}
-        if meta:
-            cleaned["metadata"] = meta
-        else:
-            cleaned.pop("metadata", None)
-    return cleaned
-
-
 def _clean_trajectory_for_save(trajectory: list) -> list:
     """Clean trajectory steps before saving to disk.
 
     Per-step transformations:
     - Remove ``all_docs`` (redundant with ``docs``).
-    - Strip ``_emb``/``relevant_text``/duplicate ``id``/duplicate
-      ``metadata.title`` from docs (see :func:`_clean_doc_for_save`).
+    - Reduce every doc to a bare ``{"doc_id": ...}`` entry.  No document text,
+      title, or metadata is ever written — the ranked *order* of docs within a
+      step is preserved so retrieval evaluation can reconstruct per-step
+      rankings positionally, and exact scores remain in the retrieval/seen
+      ``.trec`` files.  Docs without a resolvable id are dropped.
     """
     cleaned_steps = []
     for step in trajectory:
@@ -144,59 +111,15 @@ def _clean_trajectory_for_save(trajectory: list) -> list:
         # Remove all_docs — docs is sufficient
         step.pop("all_docs", None)
 
-        if "docs" in step and step["docs"]:
-            step["docs"] = [_clean_doc_for_save(doc) for doc in step["docs"]]
+        if step.get("docs"):
+            step["docs"] = [
+                {"doc_id": did}
+                for doc in step["docs"]
+                if (did := (doc.get("doc_id") or doc.get("id")))
+            ]
 
         cleaned_steps.append(step)
     return cleaned_steps
-
-
-def _extract_doc_pool(trajectory: list, save_doc_text: bool) -> tuple:
-    """Hoist heavy/stable doc fields into a shared per-file ``documents`` pool.
-
-    Each step's ``docs`` are reduced to lightweight references that keep only
-    per-step fields (``doc_id``, rank/score, controller fields, …).  The stable
-    fields (``title``, ``contents``, ``text``, ``metadata``) are stored once in
-    the returned pool keyed by ``doc_id``.  A doc retrieved across N steps thus
-    stores its text once instead of N times.
-
-    When *save_doc_text* is False the text fields (``contents``/``text``) are
-    omitted from the pool entirely — trajectory files then carry only doc-id
-    references plus titles, recoverable from the corpus at analysis time.
-
-    Docs without a resolvable ``doc_id`` are left inline (cannot be pooled).
-
-    Returns:
-        ``(trajectory_with_refs, documents_pool)``.
-    """
-    pool: Dict[str, Dict[str, Any]] = {}
-    out_steps = []
-    for step in trajectory:
-        step = dict(step)
-        docs = step.get("docs")
-        if docs:
-            ref_docs = []
-            for doc in docs:
-                did = doc.get("doc_id") or doc.get("id")
-                if not did:
-                    ref_docs.append(doc)  # cannot pool without an id
-                    continue
-                # Collect the stable fields into the pool (once per doc_id).
-                if did not in pool:
-                    entry = {}
-                    for f in _DOC_POOL_FIELDS:
-                        if f in _DOC_TEXT_FIELDS and not save_doc_text:
-                            continue
-                        if f in doc:
-                            entry[f] = doc[f]
-                    pool[did] = entry
-                # Reference keeps only the per-step fields.
-                ref_docs.append({
-                    k: v for k, v in doc.items() if k not in _DOC_POOL_FIELDS
-                })
-            step["docs"] = ref_docs
-        out_steps.append(step)
-    return out_steps, pool
 
 
 def _fold_controller_into_steps(
@@ -265,21 +188,6 @@ class TrajectoryEvaluator:
         metrics = evaluator.evaluate(results)
         evaluator.print_results(metrics)
     """
-
-    def __init__(self, save_doc_text: bool = True, dedup_docs: bool = True) -> None:
-        """
-        Args:
-            save_doc_text: When True (default) the full document text is written
-                to the per-query trajectory file.  When False only doc-id
-                references + titles are kept, producing much smaller files
-                (text is recoverable from the corpus at analysis time).
-            dedup_docs:    When True (default) stable per-doc fields are hoisted
-                into a single per-file ``documents`` pool so a doc surfaced in
-                multiple steps stores its text once.  Set False to keep the
-                legacy inline-per-step format.
-        """
-        self.save_doc_text = save_doc_text
-        self.dedup_docs = dedup_docs
 
     # ------------------------------------------------------------------
     # Public API
@@ -526,23 +434,8 @@ class TrajectoryEvaluator:
             result.get("controller_score_history") or result.get("tracker_score_history"),
         )
 
-        # Clean trajectory: remove all_docs, strip _emb/relevant_text/duplicate id.
+        # Clean trajectory: remove all_docs and reduce docs to bare doc ids.
         item["trajectory"] = _clean_trajectory_for_save(item["trajectory"])
-
-        # Hoist stable doc fields into a shared pool (dedup across steps) and,
-        # when configured, drop the document text entirely.
-        if self.dedup_docs:
-            item["trajectory"], documents = _extract_doc_pool(
-                item["trajectory"], self.save_doc_text,
-            )
-            if documents:
-                item["documents"] = documents
-        elif not self.save_doc_text:
-            # No pooling, but still honour text suppression by stripping inline.
-            for step in item["trajectory"]:
-                for doc in step.get("docs", []) or []:
-                    for f in _DOC_TEXT_FIELDS:
-                        doc.pop(f, None)
 
         json_path = f"{output_dir_str.rstrip('/')}/{query_id}.json"
         with open(json_path, "w") as f:

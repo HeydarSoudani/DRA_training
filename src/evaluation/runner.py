@@ -102,11 +102,7 @@ def build_evaluators(qrels: Dict, kwargs: Dict[str, Any], answers: Optional[Dict
             **report_kwargs,
         )
 
-    trajectory_evaluator = TrajectoryEvaluator(
-        save_doc_text=kwargs.get("save_doc_text", True),
-        dedup_docs=kwargs.get("dedup_docs", True),
-    )
-    return retrieval_evaluator, GenerationEvaluator(), trajectory_evaluator, cited_doc_evaluator, seen_doc_evaluator, accuracy_evaluator, report_evaluator, ControllerEvaluator()
+    return retrieval_evaluator, GenerationEvaluator(), TrajectoryEvaluator(), cited_doc_evaluator, seen_doc_evaluator, accuracy_evaluator, report_evaluator, ControllerEvaluator()
 
 
 def _load_single_query(run_dir, query_id, retrieval_dir_str, lightweight=False):
@@ -203,7 +199,7 @@ def evaluate_and_save(results: Dict[str, Any], generation_evaluator: GenerationE
     Retrieval metrics are produced per fusion method by
     :func:`run_fusion_eval` and stored under the ``"retrieval"`` key in
     summary.json.  This function handles generation, trajectory,
-    cited-doc, seen-doc, accuracy, and tracker evaluation.
+    cited-doc, seen-doc, accuracy, and controller evaluation.
 
     Terminal output order matches the summary.json structure.
 

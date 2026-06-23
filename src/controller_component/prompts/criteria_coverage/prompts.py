@@ -1,7 +1,7 @@
 """Criteria coverage prompts: system instructions, user templates, and extraction.
 
-Provides the prompts and parsing logic for the CriteriaCoverageSignal component
-of the trajectory tracker. The component decomposes a query into information-need
+Provides the prompts and parsing logic for the CriteriaCoverageSignal of the
+controller component. The signal decomposes a query into information-need
 criteria, tracks their coverage status across iterations, and reports a structured
 summary for logging and (later) controller consumption.
 

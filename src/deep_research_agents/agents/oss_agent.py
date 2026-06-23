@@ -221,11 +221,11 @@ class OSS_Agent(BasicAgent):
                     break
                 continue
 
-            # Process function calls — evaluate tracker per query
+            # Process function calls — evaluate controller per query
             new_messages = messages.copy()
             n_searches = sum(1 for fc in function_calls if fc["name"] == "search")
             last_search_msg_idx: Optional[int] = None
-            _first_tracker_action = None
+            _first_controller_action = None
             _stop_tracking = False
 
             for idx, tool_call in enumerate(function_calls):
@@ -287,14 +287,14 @@ class OSS_Agent(BasicAgent):
                     if tool_call["name"] == "search" and search_query:
                         last_search_msg_idx = len(new_messages) - 1
 
-                        # Per-query tracker: stop evaluating after first non-continue
+                        # Per-query controller: stop evaluating after first non-continue
                         if not _stop_tracking:
                             _result, _stop_tracking = self._track_query(
                                 search_query, docs[:self.seen_top_k],
                                 query, cur_reasoning, new_messages, reasoning_path,
                             )
                             if _result is not None:
-                                _first_tracker_action = _result
+                                _first_controller_action = _result
 
                 except Exception as e:
                     error_msg = f"Error executing {tool_call.get('name', 'unknown')}: {e}"
@@ -303,10 +303,10 @@ class OSS_Agent(BasicAgent):
                         tool_call.get("call_id", ""), error_msg,
                     ))
 
-            # Apply the first non-continue tracker action
-            if _first_tracker_action is not None:
-                if self._apply_tracker_action(
-                    _first_tracker_action, new_messages, reasoning_path, last_search_msg_idx,
+            # Apply the first non-continue controller action
+            if _first_controller_action is not None:
+                if self._apply_controller_action(
+                    _first_controller_action, new_messages, reasoning_path, last_search_msg_idx,
                     original_query=query,
                 ):
                     _early_stop = True

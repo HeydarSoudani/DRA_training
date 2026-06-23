@@ -25,7 +25,7 @@ import math
 import time
 from typing import Any, Dict, List, Optional, Union
 
-from openai import OpenAI
+from reasoner_component import get_openai_client
 from rank_llm.data import Candidate, Query, Request, Result
 
 logger = logging.getLogger(__name__)
@@ -120,7 +120,7 @@ class Qwen3Reranker:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
 
-        self._client = OpenAI(base_url=api_url, api_key=api_key)
+        self._client = get_openai_client(api_url, api_key)
         logger.info(
             "Qwen3Reranker initialised: model=%s, api_url=%s",
             model_name, api_url,

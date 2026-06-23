@@ -1,6 +1,6 @@
 """Config-driven reranker factory.
 
-Maps a pipeline reranker *name* (e.g. ``"rankllama"``, ``"report_aware"``) plus a
+Maps a pipeline reranker *name* (e.g. ``"rankllama"``, ``"qwen3_reranker"``) plus a
 config ``kwargs`` dict to a constructed reranker, dispatching to the matching
 ``setup_*`` helper in this package.  Kept here, next to the rerankers it builds,
 so callers only depend on :mod:`searcher_component.rerankers`.
@@ -18,14 +18,19 @@ def build_reranker_from_config(
     if post_retrieval_reranker == "null":
         return None
 
-    if post_retrieval_reranker in ("batched_reranker", "reranker_selector"):
+    if post_retrieval_reranker == "batched_reranker":
         cfg = kwargs.get("batched_reranker_config")
         if cfg is None:
             return None
         from .batched_reranker import setup_batched_reranker
+        # The score-threshold selector is an optional component of the batched
+        # reranker (enabled via cfg["enable_selector"]), not a separate reranker.
         return setup_batched_reranker(
             reranker_model=cfg["reranker_model"],
             max_chars_per_document=cfg["max_chars_per_document"],
+            enable_selector=cfg.get("enable_selector", False),
+            selector_score_threshold=cfg.get("selector_score_threshold", 3.0),
+            selector_min_keep=cfg.get("selector_min_keep", 0),
         )
 
     if post_retrieval_reranker == "listwise":
@@ -69,31 +74,14 @@ def build_reranker_from_config(
         from .qwen3_reranker import setup_qwen3_reranker
         return setup_qwen3_reranker(**cfg)
 
-    if post_retrieval_reranker in ("report_aware", "report_aware_iter"):
-        cfg = kwargs.get("report_aware_reranker_config")
+    if post_retrieval_reranker == "monot5":
+        cfg = kwargs.get("monot5_reranker_config")
         if cfg is None:
             return None
-        from .report_aware_reranker import setup_report_aware_reranker
-        return setup_report_aware_reranker(**cfg)
-
-    if post_retrieval_reranker == "query_aware_doc_rewriting":
-        cfg = kwargs.get("query_aware_doc_rewriting_config")
-        if cfg is None:
-            return None
-        # Build the inner reranker first
-        inner_reranker_name = cfg.get("rewrite_rerank_model", "rankllama")
-        inner_reranker = build_reranker_from_config(inner_reranker_name, kwargs, device=device)
-        if inner_reranker is None:
-            return None
-        from .query_aware_doc_rewriting_reranker import setup_query_aware_doc_rewriting_reranker
-        return setup_query_aware_doc_rewriting_reranker(
-            rewrite_model=cfg.get("rewrite_model", "gpt-4.1-mini"),
-            inner_reranker=inner_reranker,
-            max_chars=cfg.get("max_chars", 1500),
-            max_words=cfg.get("max_words", 150),
-            temperature=cfg.get("temperature", 0.0),
-            max_tokens=cfg.get("max_tokens", 500),
-            verbose=cfg.get("verbose", False),
-        )
+        if device:
+            cfg = dict(cfg)
+            cfg["device"] = device
+        from .monot5_reranker import setup_monot5_reranker
+        return setup_monot5_reranker(**cfg)
 
     return None

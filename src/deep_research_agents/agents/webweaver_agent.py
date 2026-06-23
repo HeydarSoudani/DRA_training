@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from utils.llm_client import LiteLLMClient
 
 from .base_agent import BasicAgent
-from controller_component import TrackerCriticalThinkDeferred, TrackerCriticalThinkResult, TrackerEarlyStopResult
+from deep_research_agents.agent_tools.controller_results import CriticalThinkDeferred, CriticalThinkResult, EarlyStopResult
 from utils.config import InferenceConfig
 from utils.text_utils import extract_tag_content as _extract_tag, parse_tool_call_xml
 from deep_research_agents.prompts.webweaver.user_prompts import (
@@ -242,8 +242,8 @@ class WebWeaver_Agent(BasicAgent):
 
         self._status_callback = status_callback
         self._search_iter     = 0
-        # Reset trajectory tracker for this query (loads per-query qrels)
-        self._reset_tracker(query_id=query_id)
+        # Reset trajectory controller for this query (loads per-query qrels)
+        self._reset_controller(query_id=query_id)
         _meter = self._token_meter()
         _tok_start = _meter.snapshot() if _meter is not None else None
         if _meter is not None:
@@ -446,19 +446,19 @@ class WebWeaver_Agent(BasicAgent):
                 self._vprint(step_num, "plan-error", "Empty query list")
             else:
                 try:
-                    new_entries, tracker_result = search_fn(queries, goal, thought=thought)
+                    new_entries, controller_result = search_fn(queries, goal, thought=thought)
                     for eid, entry in new_entries.items():
                         new_state.memory_bank[eid] = entry
                     obs = f"Added {len(new_entries)} evidence entries to memory bank."
-                    if isinstance(tracker_result, TrackerEarlyStopResult):
+                    if isinstance(controller_result, EarlyStopResult):
                         new_state.terminated = True
-                    elif isinstance(tracker_result, TrackerCriticalThinkResult):
+                    elif isinstance(controller_result, CriticalThinkResult):
                         obs += (
-                            f"\n[Critical Redirect — {tracker_result.critical_search_query}]\n"
-                            f"{tracker_result.critical_observation}"
+                            f"\n[Critical Redirect — {controller_result.critical_search_query}]\n"
+                            f"{controller_result.critical_observation}"
                         )
-                    elif tracker_result:
-                        obs = tracker_result
+                    elif controller_result:
+                        obs = controller_result
                     self._vprint(step_num, "plan-ret", f"{len(new_entries)} entries, memory bank: {len(new_state.memory_bank)}")
                 except Exception as e:
                     obs = f"Search error: {e}"
@@ -645,7 +645,7 @@ class WebWeaver_Agent(BasicAgent):
         def search_fn(queries: List[str], goal: str, thought: str = "") -> Tuple[Dict[str, Dict], Optional[str]]:
             new_entries: Dict[str, Dict] = {}
             n_queries = len(queries)
-            _first_tracker_action = None
+            _first_controller_action = None
             _stop_tracking = False
 
             for q_idx, query in enumerate(queries):
@@ -690,7 +690,7 @@ class WebWeaver_Agent(BasicAgent):
                     "all_docs":          docs,
                     "component_doc_ids": [d.get("doc_id", "") for d in docs[:self.seen_top_k]],
                     "sub_iter":          sub_iter,
-                    "tracker_observation": None,
+                    "controller_observation": None,
                 })
 
                 if not _stop_tracking:
@@ -701,19 +701,19 @@ class WebWeaver_Agent(BasicAgent):
                         question, thought, [], reasoning_path,
                     )
                     if _result is not None:
-                        _first_tracker_action = _result
+                        _first_controller_action = _result
 
-            tracker_result = _first_tracker_action
+            controller_result = _first_controller_action
 
-            if isinstance(tracker_result, TrackerCriticalThinkDeferred):
-                tracker_result = self._execute_deferred_critical_search(
-                    tracker_result, question,
+            if isinstance(controller_result, CriticalThinkDeferred):
+                controller_result = self._execute_deferred_critical_search(
+                    controller_result, question,
                     trajectory=[], reasoning_path=reasoning_path,
                 )
                 self._search_step += 1
 
-            if isinstance(tracker_result, TrackerCriticalThinkResult):
-                for doc in tracker_result.critical_docs[:self.seen_top_k]:
+            if isinstance(controller_result, CriticalThinkResult):
+                for doc in controller_result.critical_docs[:self.seen_top_k]:
                     entry_id = doc.get("doc_id") or doc.get("id") or ""
                     if not entry_id:
                         continue
@@ -730,16 +730,16 @@ class WebWeaver_Agent(BasicAgent):
                 reasoning_path.append({
                     "action_type":       "critical_search",
                     "phase":             "planner",
-                    "search_query":      [tracker_result.critical_search_query],
-                    "think":             tracker_result.critical_think,
-                    "docs":              tracker_result.critical_docs,
+                    "search_query":      [controller_result.critical_search_query],
+                    "think":             controller_result.critical_think,
+                    "docs":              controller_result.critical_docs,
                     "component_doc_ids": [
-                        d.get("doc_id", "") for d in tracker_result.critical_docs[:self.seen_top_k]
+                        d.get("doc_id", "") for d in controller_result.critical_docs[:self.seen_top_k]
                     ],
                     "is_critical_think":       True,
                 })
 
-            return new_entries, tracker_result
+            return new_entries, controller_result
 
         # ── Planner loop ──────────────────────────────────────────────────────
         self._current_phase = "plan"

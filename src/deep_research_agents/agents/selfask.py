@@ -14,7 +14,7 @@ SELF_ASK_PROMPT_MULTI_HOP = (_PROMPT_DIR / "system.txt").read_text()
 from deep_research_agents.prompts.selfask.user_prompt import USER_PROMPT as _SELFASK_USER_PROMPT
 
 from .base_agent import BasicAgent
-from controller_component import TrackerCriticalThinkResult, TrackerEarlyStopResult
+from deep_research_agents.agent_tools.controller_results import CriticalThinkResult, EarlyStopResult
 from controller_component.prompts.answer_prompts import FINAL_ANSWER_INSTRUCTION, SELFASK_FORMAT
 
 logger = logging.getLogger(__name__)
@@ -78,9 +78,9 @@ class SelfAsk_Agent(BasicAgent):
             )
         else:
             cur_search_docs = self.retrieve_documents(search_query, original_query=question)
-        # Trajectory tracker: may inject observation or critical_think for initial search
+        # Trajectory controller: may inject observation or critical_think for initial search
         seen_docs_init = cur_search_docs[:self.seen_top_k]
-        tracker_result_init = self.post_search_evaluate(
+        controller_result_init = self.post_search_evaluate(
             subquery=search_query, docs=seen_docs_init,
             iter_num=0, original_query=question,
             seen_docs=seen_docs_init,
@@ -88,9 +88,9 @@ class SelfAsk_Agent(BasicAgent):
 
         # seen_top_k docs are passed to the LLM; all retrieved docs go to TREC
         docs_text = self.documents2string(cur_search_docs[:self.seen_top_k])
-        if isinstance(tracker_result_init, TrackerCriticalThinkResult):
-            cur_search_docs = tracker_result_init.critical_docs
-            docs_text = tracker_result_init.critical_observation
+        if isinstance(controller_result_init, CriticalThinkResult):
+            cur_search_docs = controller_result_init.critical_docs
+            docs_text = controller_result_init.critical_observation
         user_input_prompt = self.user_prompt.format(
             documents=docs_text,
             question=question
@@ -151,20 +151,20 @@ class SelfAsk_Agent(BasicAgent):
                     cur_search_docs = self.retrieve_documents(search_query, original_query=question)
             else:
                 cur_search_docs = []
-            # Trajectory tracker: may inject observation, critical_think, or early stop
+            # Trajectory controller: may inject observation, critical_think, or early stop
             seen_docs = cur_search_docs[:self.seen_top_k]
-            tracker_result = self.post_search_evaluate(
+            controller_result = self.post_search_evaluate(
                 subquery=search_query or question, docs=seen_docs,
                 iter_num=iter_num, original_query=question,
                 thinking=intermediate_ans or "",
                 seen_docs=seen_docs if seen_docs else None,
                 trajectory=messages,
             )
-            _early_stop_triggered = isinstance(tracker_result, TrackerEarlyStopResult)
+            _early_stop_triggered = isinstance(controller_result, EarlyStopResult)
 
             # Handle critical_think: extend docs pool with critical docs
-            if not _early_stop_triggered and isinstance(tracker_result, TrackerCriticalThinkResult):
-                cur_search_docs = cur_search_docs + tracker_result.critical_docs
+            if not _early_stop_triggered and isinstance(controller_result, CriticalThinkResult):
+                cur_search_docs = cur_search_docs + controller_result.critical_docs
 
             # Aggregate component-visible docs from all steps (seen_top_k per step)
             tmp_docs = [
@@ -191,7 +191,7 @@ class SelfAsk_Agent(BasicAgent):
                 text += f"{intermediate_ans}\nFollow up: {search_query}\nIntermediate answer: "
 
             docs_str = self.documents2string(unq_tmp_doc)
-            if isinstance(tracker_result, TrackerCriticalThinkResult):
+            if isinstance(controller_result, CriticalThinkResult):
                 pass  # keep aggregated docs_str with critical_think docs included
             user_input_prompt = self.user_prompt.format(
                 documents=docs_str,

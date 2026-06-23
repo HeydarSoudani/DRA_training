@@ -20,7 +20,7 @@ except ImportError:
     json5 = None
 
 from .base_agent import BasicAgent
-from controller_component import TrackerCriticalThinkDeferred, TrackerCriticalThinkResult, TrackerEarlyStopResult
+from deep_research_agents.agent_tools.controller_results import CriticalThinkDeferred, CriticalThinkResult, EarlyStopResult
 from controller_component.prompts.answer_prompts import (
     FINAL_ANSWER_INSTRUCTION,
     TAG_FORMAT,
@@ -384,12 +384,12 @@ class TongyiDR_Agent(BasicAgent):
                         result_text = "No valid search query found. Please use the search tool with a single query string."
                         all_docs = []
                     else:
-                        # Process each search query individually — evaluate tracker per query
+                        # Process each search query individually — evaluate controller per query
                         n_searches = len(search_queries)
                         all_subqueries: List[str] = []
                         all_docs = []
                         all_seen_docs: List[Dict[str, Any]] = []
-                        _first_tracker_action = None
+                        _first_controller_action = None
                         _stop_tracking = False
 
                         for idx, sq in enumerate(search_queries):
@@ -436,34 +436,34 @@ class TongyiDR_Agent(BasicAgent):
                                 "tokens": self._step_tokens() if idx == 0 else None,
                             })
 
-                            # Per-query tracker: stop evaluating after first non-continue
+                            # Per-query controller: stop evaluating after first non-continue
                             if not _stop_tracking:
                                 _result, _stop_tracking = self._track_query(
                                     sq, docs[:self.seen_top_k],
                                     query, think_text, messages, reasoning_path,
                                 )
                                 if _result is not None:
-                                    _first_tracker_action = _result
+                                    _first_controller_action = _result
 
                         # Format combined results for model (single <tool_response>)
                         result_text = format_as_markdown(all_docs, self.seen_top_k)
 
-                        # Apply the first non-continue tracker action
-                        if _first_tracker_action is not None:
-                            if isinstance(_first_tracker_action, TrackerEarlyStopResult):
+                        # Apply the first non-continue controller action
+                        if _first_controller_action is not None:
+                            if isinstance(_first_controller_action, EarlyStopResult):
                                 _tongyi_early_stop = True
-                            elif isinstance(_first_tracker_action, TrackerCriticalThinkDeferred):
-                                _first_tracker_action = self._execute_deferred_critical_search(
-                                    _first_tracker_action, query,
+                            elif isinstance(_first_controller_action, CriticalThinkDeferred):
+                                _first_controller_action = self._execute_deferred_critical_search(
+                                    _first_controller_action, query,
                                     trajectory=messages, reasoning_path=reasoning_path,
                                 )
                                 self._search_step += 1
-                            if isinstance(_first_tracker_action, TrackerCriticalThinkResult):
-                                result_text += self._format_critical_redirect_text(_first_tracker_action)
+                            if isinstance(_first_controller_action, CriticalThinkResult):
+                                result_text += self._format_critical_redirect_text(_first_controller_action)
                                 ct_entry = self._critical_think_to_reasoning_entry(
-                                    _first_tracker_action, include_all_docs=True,
+                                    _first_controller_action, include_all_docs=True,
                                 )
-                                ct_entry["iteration"] = _first_tracker_action.critical_think_iter
+                                ct_entry["iteration"] = _first_controller_action.critical_think_iter
                                 reasoning_path.append(ct_entry)
                                 iteration += 1
 

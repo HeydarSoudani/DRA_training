@@ -90,14 +90,8 @@ class RankR1SetwiseReranker:
         self.top_k = top_k
         self.context_size = context_size
 
-        try:
-            from openai import OpenAI
-        except ImportError as exc:
-            raise ImportError(
-                "RankR1SetwiseReranker requires the 'openai' package. "
-                "Install it with: pip install openai"
-            ) from exc
-        self._client = OpenAI(base_url=api_url, api_key=api_key)
+        from reasoner_component import get_openai_client
+        self._client = get_openai_client(api_url, api_key)
         logger.info(
             "Rank-R1 setwise reranker: api=%s model=%s num_child=%d k=%d",
             api_url, api_model_name, num_child, k,

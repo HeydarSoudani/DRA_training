@@ -24,7 +24,7 @@ from jinja2 import Template
 
 from searcher_component.fusion import interleaving_fusion
 from deep_research_agents.agents.base_agent import BasicAgent
-from controller_component import TrackerCriticalThinkResult, TrackerEarlyStopResult
+from deep_research_agents.agent_tools.controller_results import CriticalThinkResult, EarlyStopResult
 from utils.config import InferenceConfig
 
 logger = logging.getLogger(__name__)
@@ -441,9 +441,9 @@ class CPMReport(BasicAgent):
             [fused_passages], survey, state, [fused_docs]
         )
 
-        # Trajectory tracker: may inject observation, critical_think, or early stop
+        # Trajectory controller: may inject observation, critical_think, or early stop
         seen_docs = fused_docs[:self.seen_top_k]
-        tracker_result = self.post_search_evaluate(
+        controller_result = self.post_search_evaluate(
             subquery=keywords,
             docs=seen_docs, iter_num=step,
             original_query=state["query"],
@@ -452,10 +452,10 @@ class CPMReport(BasicAgent):
             trajectory=state["trajectory"],
             reasoning_path=state["trajectory"],
         )
-        if isinstance(tracker_result, TrackerEarlyStopResult):
+        if isinstance(controller_result, EarlyStopResult):
             state["early_stop"] = True
-        elif isinstance(tracker_result, TrackerCriticalThinkResult):
-            retrieved_info += f"\n{tracker_result.critical_observation}"
+        elif isinstance(controller_result, CriticalThinkResult):
+            retrieved_info += f"\n{controller_result.critical_observation}"
 
         state["retrieved_info"] = retrieved_info
 
@@ -486,22 +486,22 @@ class CPMReport(BasicAgent):
             },
             "all_docs": fused_docs,
         })
-        if isinstance(tracker_result, TrackerCriticalThinkResult):
+        if isinstance(controller_result, CriticalThinkResult):
             critical_think_doc_ids = [
                 doc.get("doc_id") or doc.get("id") or ""
-                for doc in tracker_result.critical_docs
+                for doc in controller_result.critical_docs
             ]
             state["trajectory"].append({
-                "step": tracker_result.critical_think_iter,
+                "step": controller_result.critical_think_iter,
                 "state": "critical_search",
                 "action": "critical_search",
-                "think": tracker_result.critical_think,
-                "input": {"keywords": [tracker_result.critical_search_query]},
+                "think": controller_result.critical_think,
+                "input": {"keywords": [controller_result.critical_search_query]},
                 "output": {
                     "num_results": len(critical_think_doc_ids),
                     "doc_ids": critical_think_doc_ids[:self.seen_top_k],
                 },
-                "all_docs": tracker_result.critical_docs,
+                "all_docs": controller_result.critical_docs,
                 "is_critical_think": True,
             })
 

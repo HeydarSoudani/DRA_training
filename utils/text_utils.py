@@ -187,7 +187,7 @@ def verbose_print_search_results(
         print(f"{prefix}{iter_label} [ret result]: ... and {remaining} more docs")
 
 
-def verbose_print_tracker(
+def verbose_print_controller(
     iter_num: int,
     scores: Dict[str, Any],
     action: str,
@@ -211,8 +211,8 @@ def verbose_print_tracker(
         f"consec_sim={_fmt(scores.get('consec_query_sim'))} | orig_sim={_fmt(scores.get('orig_query_sim'))}"
     )
 
-    print(f"{prefix}{iter_label} [tracker]: {signals_line}")
-    padding = " " * len(f"{prefix}{iter_label} [tracker]: ")
+    print(f"{prefix}{iter_label} [controller]: {signals_line}")
+    padding = " " * len(f"{prefix}{iter_label} [controller]: ")
 
     ac = scores.get("criteria_coverage")
     if ac is not None and isinstance(ac, dict) and ac.get("total", 0) > 0:

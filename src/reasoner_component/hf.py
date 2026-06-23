@@ -19,10 +19,11 @@ _MODEL_TRANSFORMERS_REQUIREMENTS: dict[str, str] = {
 }
 
 
-def _check_and_install_transformers(model_name: str) -> None:
+def ensure_transformers_version(model_name: str) -> None:
     """Ensure the installed transformers version satisfies the model's requirements.
 
     Installs a compatible version and restarts the process via os.execv if needed.
+    Call this *before* constructing an ``HFGenerator`` (the factory does this).
     """
     req = _MODEL_TRANSFORMERS_REQUIREMENTS.get(model_name)
     if req is None:
@@ -62,13 +63,13 @@ class HFGenerator(BaseGenerator):
         device: Optional[str] = None,
         temperature: float = 0.0,
         max_tokens: int = 4000,
+        max_input_tokens: int = 4096,
         **kwargs,
     ):
-        _check_and_install_transformers(model_name)
-
         self.model_name = model_name
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.max_input_tokens = max_input_tokens
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
         from utils.token_meter import TokenMeter
@@ -112,7 +113,7 @@ class HFGenerator(BaseGenerator):
                 return_tensors="pt",
                 add_generation_prompt=True,
                 truncation=True,
-                max_length=4096,
+                max_length=self.max_input_tokens,
             )
             # apply_chat_template returns a Tensor or BatchEncoding depending on
             # the transformers version; handle both and preserve attention_mask.

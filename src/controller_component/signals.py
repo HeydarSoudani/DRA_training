@@ -1,12 +1,13 @@
-"""Signal classes for the trajectory tracker.
+"""Signal classes for the controller component.
 
-Provides three analysis-aligned signals and the criteria coverage signal:
+Provides the analysis-aligned signals and the criteria coverage signal:
 
 - ``DocNoveltySignal``: fraction of retrieved docs not seen before.
 - ``ConsecQuerySimilaritySignal``: cosine similarity between consecutive
   iterations' mean subquery embeddings.
 - ``OrigQuerySimilaritySignal``: cosine similarity between current
   iteration and the original query.
+- ``MarginalRecallSignal``: supervised marginal recall against qrels.
 - ``CriteriaCoverageSignal``: LLM-based query-criteria coverage tracking.
 """
 
@@ -195,6 +196,75 @@ class OrigQuerySimilaritySignal:
         self._iter_embeddings[iter_num] = emb_list
         mean = _l2_normalised_mean(emb_list)
         return float(np.dot(mean, self._orig_emb))
+
+
+# ---------------------------------------------------------------------------
+# Supervised marginal recall signal
+# ---------------------------------------------------------------------------
+
+class MarginalRecallSignal:
+    """Supervised marginal recall against ground-truth relevance judgements.
+
+    Tracks which gold (relevant) doc IDs have been seen so far across the
+    trajectory and, for each step, reports how many *newly* seen docs are
+    relevant.  ``marginal_recall`` is the fraction of this step's docs that
+    are newly-relevant.  When no qrels are loaded the signal degrades
+    gracefully to zeros.
+
+    Call :meth:`reset` (optionally with a ``query_id``) at the start of each
+    query to load that query's relevant doc IDs from ``qrels``.
+    """
+
+    def __init__(self, qrels: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
+        self._qrels = qrels or {}
+        self._current_relevant_ids: Set[str] = set()
+        self._gold_seen_so_far: Set[str] = set()
+
+    def reset(self, query_id: Optional[str] = None) -> None:
+        """Reset per-query state and load relevant IDs for ``query_id``."""
+        self._gold_seen_so_far.clear()
+        if query_id and self._qrels:
+            self._current_relevant_ids = {
+                d for d, r in self._qrels.get(query_id, {}).items() if r > 0
+            }
+        else:
+            self._current_relevant_ids = set()
+
+    def score(self, seen_docs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Compute marginal recall stats for a single search step."""
+        current_ids = {
+            doc.get("doc_id") or doc.get("id") or ""
+            for doc in seen_docs
+        }
+        current_ids.discard("")
+        num_docs_this_step: int = len(current_ids)
+
+        if self._current_relevant_ids and num_docs_this_step > 0:
+            all_gold_this_step = current_ids & self._current_relevant_ids
+            new_gold = all_gold_this_step - self._gold_seen_so_far
+            num_new_relevant = len(new_gold)
+            num_repeated_relevant = len(all_gold_this_step) - num_new_relevant
+            num_irrelevant = num_docs_this_step - len(all_gold_this_step)
+            marginal_recall = num_new_relevant / num_docs_this_step
+            self._gold_seen_so_far.update(new_gold)
+        elif num_docs_this_step > 0:
+            num_new_relevant = 0
+            num_repeated_relevant = 0
+            num_irrelevant = num_docs_this_step
+            marginal_recall = 0.0
+        else:
+            num_new_relevant = 0
+            num_repeated_relevant = 0
+            num_irrelevant = 0
+            marginal_recall = 0.0
+
+        return {
+            "marginal_recall": marginal_recall,
+            "num_new_relevant": num_new_relevant,
+            "num_repeated_relevant": num_repeated_relevant,
+            "num_irrelevant": num_irrelevant,
+            "num_docs_this_step": num_docs_this_step,
+        }
 
 
 # ---------------------------------------------------------------------------

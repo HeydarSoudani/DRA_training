@@ -180,21 +180,8 @@ def load_result_from_saved_files(
         try:
             content = _read_bytes("trajectory", f"{query_id}.json")
             saved = _json_loads(content)
-            trajectory = saved.get("trajectory", [])
-            # Rehydrate the shared ``documents`` pool back into each step's docs.
-            # Stable fields (title/contents/text/metadata) were hoisted at save
-            # time to store each doc's text once instead of once per step.
-            documents = saved.get("documents")
-            if documents:
-                for step in trajectory:
-                    for doc in step.get("docs", []) or []:
-                        did = doc.get("doc_id") or doc.get("id")
-                        pooled = documents.get(did) if did else None
-                        if pooled:
-                            for k, v in pooled.items():
-                                doc.setdefault(k, v)
             result = {
-                "trajectory":   trajectory,
+                "trajectory":   saved.get("trajectory", []),
                 "generation":   saved.get("generation", ""),
                 "num_steps":    saved.get("num_steps", 0),
                 "num_searches": saved.get("num_searches", 0),
@@ -338,7 +325,7 @@ def build_searcher_config_name(**kwargs) -> str:
 
     seen_top_k = kwargs.get("seen_top_k", 10)
     prr        = kwargs.get("post_retrieval_reranker_name", "null")
-    pfr        = kwargs.get("post_fusion_reranker_name", "batched_reranker")
+    pfr        = kwargs.get("post_fusion_reranker_name", "null")
     rrk        = kwargs.get("rerank_top_k", 100)
     ri         = kwargs.get("retrieval_input", "subquery")
     pfri       = kwargs.get("post_fusion_reranker_input", "original_query")

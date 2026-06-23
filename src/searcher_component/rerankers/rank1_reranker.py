@@ -122,14 +122,8 @@ class Rank1Reranker:
         if backend == "api":
             if api_url is None:
                 raise ValueError("api_url must be provided when backend='api'")
-            try:
-                from openai import OpenAI
-            except ImportError as exc:
-                raise ImportError(
-                    "Rank1Reranker with backend='api' requires the 'openai' package. "
-                    "Install it with: pip install openai"
-                ) from exc
-            self._openai_client = OpenAI(base_url=api_url, api_key="EMPTY")
+            from reasoner_component import get_openai_client
+            self._openai_client = get_openai_client(api_url, "EMPTY")
             logger.info("Rank1: using API backend at %s", api_url)
 
         elif backend == "vllm":

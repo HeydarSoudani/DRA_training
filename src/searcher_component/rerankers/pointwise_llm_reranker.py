@@ -9,7 +9,7 @@ import random
 from typing import Dict, List, Tuple, Optional
 from pydantic import BaseModel, Field
 
-from utils.llm_client import get_litellm_client, LiteLLMClient
+from reasoner_component import get_litellm_client, LiteLLMClient
 
 logger = logging.getLogger(__name__)
 
