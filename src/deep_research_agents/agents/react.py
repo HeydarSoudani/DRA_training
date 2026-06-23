@@ -5,12 +5,9 @@ Retrieval  : pipeline local retriever (``self.retrieve_documents``)
 """
 
 import logging
-import sys
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from utils.llm_client import LiteLLMClient
 
@@ -21,7 +18,7 @@ REACT_WITH_PLAN_SYSTEM_PROMPT = (_PROMPT_DIR / "system_with_plan.txt").read_text
 logger = logging.getLogger(__name__)
 
 from .base_agent import BasicAgent
-from agent_tools.react_tools import PlanTool
+from deep_research_agents.agent_tools.react_tools import PlanTool
 from controller_component import TrackerCriticalThinkResult, TrackerEarlyStopResult
 from controller_component.prompts.answer_prompts import FINAL_ANSWER_INSTRUCTION, REACT_FORMAT
 from utils.text_utils import passages2string
@@ -356,6 +353,7 @@ class ReActAgent(BasicAgent):
                         "query": action_entity,
                         "docs": docs,
                         "component_doc_ids": component_doc_ids,
+                        "tokens": self._step_tokens(),
                     })
 
                 # Trajectory tracker: evaluate after each search

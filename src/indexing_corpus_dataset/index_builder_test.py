@@ -37,15 +37,12 @@ Usage:
 """
 
 import os
-import sys
 import json
 import argparse
 import tempfile
 from pathlib import Path
 
-# Add project root for imports
 _project_root = Path(__file__).resolve().parent.parent.parent.parent
-sys.path.insert(0, str(_project_root / "src"))
 
 from tqdm import tqdm
 
@@ -224,10 +221,10 @@ def _parse_args():
     parser.add_argument('--device-id', type=int, default=None, dest='device_id', help='GPU device ID for CUDA systems (e.g., 0, 1). Ignored for MPS.')
 
     # Dataset args (following run_sequential_pipeline.py conventions)
-    parser.add_argument('--dataset', type=str, default='browsecomp_plus', choices=['neuclir', 'trec_rag', 'uk', 'us', 'browsecomp_plus'], help='Dataset name')
+    parser.add_argument('--dataset', type=str, default='browsecomp_plus', choices=['neuclir', 'trec_rag', 'browsecomp_plus'], help='Dataset name')
     # Accept both --dataset-year and --data-set (submit_index_builder_test.py uses the latter).
     parser.add_argument('--dataset-year', '--data-set', type=str, default=None, dest='dataset_year', help='Dataset year (e.g. 2023, 2024). Auto-selected if omitted.')
-    parser.add_argument('--subset', type=str, default=None, help='Dataset subset (e.g. news, technical for neuclir; set1 for us/uk). Auto-selected if omitted.')
+    parser.add_argument('--subset', type=str, default=None, help='Dataset subset (e.g. news, technical for neuclir). Auto-selected if omitted.')
     parser.add_argument('--query-key', type=str, default=None, dest='query_key', help='Key in query JSONL records to use as query text. Auto-selected if omitted.')
     parser.add_argument('--min-relevance-score', type=int, default=None, dest='min_relevance_score', help='Minimum relevance score to treat as relevant (default: 3 for trec_rag/neuclir)')
     parser.add_argument('--query-limit', type=int, default=10, dest='query_limit', help='Max number of queries to use')
@@ -240,15 +237,13 @@ def _parse_args():
 def main():
     args = _parse_args()
 
-    # ── Auto-select dataset args (following auto_select_data_args from utils.py) ──
+    # ── Auto-select dataset args ──
     if args.dataset_year is None and args.dataset in ["trec_rag", "neuclir"]:
         args.dataset_year = "2024"
         print(f"Auto-selected dataset year: {args.dataset_year}")
 
     if args.subset is None:
-        if args.dataset in ["us", "uk"]:
-            args.subset = "set1"
-        elif args.dataset == "neuclir":
+        if args.dataset == "neuclir":
             args.subset = "news"
         if args.subset is not None:
             print(f"Auto-selected subset: {args.subset}")
@@ -268,7 +263,7 @@ def main():
         elif args.dataset == "browsecomp_plus":
             args.min_relevance_score = 1  # gold=2, evidence=1, skip hard negatives=0
 
-    # ── Resolve file_data_set (following resolve_file_data_set from utils.py) ──
+    # ── Resolve file_data_set ──
     if args.dataset == "neuclir":
         file_data_set = (
             f"{args.dataset_year}_{args.subset}"
@@ -320,7 +315,7 @@ def main():
     print(f"Save dir:      {args.save_dir}")
     print(f"Retriever:     {args.retrieval_method}")
 
-    # ── 1. Load queries and qrels (following load_and_filter_queries from utils.py) ──
+    # ── 1. Load queries and qrels ──
     print("\n=== 1. Loading queries and qrels ===")
     if args.data_path:
         data_path = args.data_path  # S3 path or explicit local path

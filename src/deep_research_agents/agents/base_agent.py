@@ -1,15 +1,9 @@
 """Base class for retrieval agents."""
 
 import copy
-import sys
 import logging
 import traceback
-from pathlib import Path
 from typing import Callable, Dict, List, Any, Optional, Union
-
-# Add src and deep_research_agents/ to path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from utils.llm_client import LiteLLMClient
 from searcher_component import normalize_retrieval_response
@@ -212,13 +206,13 @@ class AgentVerboseMixin:
         if tracker is not None:
             tracker.reset(query_id=query_id)
 
-    def _attach_tracker_stats(self, result: dict) -> None:
-        tracker = getattr(self, "controller", None)
-        if tracker is not None:
-            result["tracker_score_history"] = list(tracker.score_history)
-            result["tracker_unique_doc_ids"] = sorted(tracker.unique_doc_ids)
-            result["tracker_unique_doc_count"] = tracker.unique_doc_count
-            result["tracker_answer_candidates"] = list(tracker.answer_candidates)
+    def _attach_controller_stats(self, result: dict) -> None:
+        controller = getattr(self, "controller", None)
+        if controller is not None:
+            result["controller_score_history"] = list(controller.score_history)
+            result["controller_unique_doc_ids"] = sorted(controller.unique_doc_ids)
+            result["controller_unique_doc_count"] = controller.unique_doc_count
+            result["controller_answer_candidates"] = list(controller.answer_candidates)
 
 
 def _strip_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -279,6 +273,27 @@ class BasicAgent(AgentVerboseMixin):
 
     # Agent display name used by _display_name property; subclasses can override.
     AGENT_NAME: str = "Agent"
+
+    def _token_meter(self):
+        """Return the active :class:`TokenMeter`, or None if unavailable.
+
+        Prefers an agent-owned ``self.token_meter`` (vendor agents that hold
+        their own provider client) and falls back to the generator's meter
+        (LiteLLM/HF-backed agents using ``self.generator``).
+        """
+        meter = getattr(self, "token_meter", None)
+        if meter is not None:
+            return meter
+        for client_attr in ("generator", "_vllm_client"):
+            meter = getattr(getattr(self, client_attr, None), "token_meter", None)
+            if meter is not None:
+                return meter
+        return None
+
+    def _step_tokens(self):
+        """Tokens consumed since the previous trajectory step (or None)."""
+        meter = self._token_meter()
+        return meter.since_last_step() if meter is not None else None
 
     def get_answer_candidate_llm(self) -> Optional[LiteLLMClient]:
         """Return a LiteLLM client for answer candidate generation.
@@ -762,6 +777,11 @@ class BasicAgent(AgentVerboseMixin):
         self._search_iter     = 0
         # Reset controller for this query (loads per-query qrels)
         self._reset_tracker(query_id=query_id)
+        # Snapshot token usage so we can report per-query totals.
+        _meter = self._token_meter()
+        _tok_start = _meter.snapshot() if _meter is not None else None
+        if _meter is not None:
+            _meter.since_last_step()  # clear per-step cursor for this query
         try:
             inference_result = self.inference(query_text, generation_temp=temperature)
 
@@ -788,7 +808,17 @@ class BasicAgent(AgentVerboseMixin):
                 result["num_iterations"] = num_iterations
 
             # Attach controller stats when available
-            self._attach_tracker_stats(result)
+            self._attach_controller_stats(result)
+
+            # Attach per-query token usage when a meter is available.
+            if _meter is not None and _tok_start is not None:
+                _tok_end = _meter.snapshot()
+                result["token_usage"] = {
+                    "input_tokens": _tok_end["input_tokens"] - _tok_start["input_tokens"],
+                    "output_tokens": _tok_end["output_tokens"] - _tok_start["output_tokens"],
+                    "total_tokens": _tok_end["total_tokens"] - _tok_start["total_tokens"],
+                    "num_calls": _tok_end["num_calls"] - _tok_start["num_calls"],
+                }
 
             if num_iterations is not None:
                 logger.info(
@@ -816,7 +846,7 @@ class BasicAgent(AgentVerboseMixin):
     # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
-    # Shared tool-call loop helpers (GLM, OSS, Bedrock)
+    # Shared tool-call loop helpers (GLM, OSS)
     # ------------------------------------------------------------------
 
     def _build_tool_response_message(
@@ -1260,7 +1290,7 @@ class TagReasoningAgent(BasicAgent):
                 self._vprint(iter_num, "think", one_step_think or "(no think)")
                 self._notify_progress("answer", iter_num)
                 self._vprint(iter_num, "answer", prediction or "(no answer)")
-                reasoning_path.append({'think': one_step_think, 'prediction': prediction})
+                reasoning_path.append({'think': one_step_think, 'prediction': prediction, 'tokens': self._step_tokens()})
                 break
 
             tmp_query = self.get_query(output_text)
@@ -1297,6 +1327,7 @@ class TagReasoningAgent(BasicAgent):
                 'search_query': tmp_query,
                 'docs': search_docs,
                 'component_doc_ids': [d.get('doc_id', '') for d in search_docs[:self.seen_top_k]],
+                'tokens': self._step_tokens(),
             })
 
             search_text = self.curr_step_template.format(output_text=output_text, search_results=search_results)
@@ -1334,6 +1365,7 @@ class TagReasoningAgent(BasicAgent):
                 'action_type': action_type,
                 'think': FINAL_ANSWER_INSTRUCTION,
                 'prediction': prediction,
+                'tokens': self._step_tokens(),
             })
 
         num_iterations = iter_idx + 1 if reasoning_path else 0

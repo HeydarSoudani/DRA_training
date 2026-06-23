@@ -15,10 +15,13 @@ from typing import Dict, Optional
 
 # Maps agentic-model name → HuggingFace model ID for vLLM-served finetuned models
 FINETUNED_MODEL_MAP: Dict[str, str] = {
-    "drtulu":    "rl-research/DR-Tulu-8B",
-    "webweaver": "Alibaba-NLP/Tongyi-DeepResearch-30B-A3B",
-    "tongyi":    "Alibaba-NLP/Tongyi-DeepResearch-30B-A3B",
+    "drtulu":     "rl-research/DR-Tulu-8B",
+    "webweaver":  "Alibaba-NLP/Tongyi-DeepResearch-30B-A3B",
+    "tongyi":     "Alibaba-NLP/Tongyi-DeepResearch-30B-A3B",
     "cpm_report": "openbmb/AgentCPM-Report",
+    "searchr1":   "PeterJinGo/SearchR1-nq_hotpotqa_train-qwen2.5-7b-it-em-grpo-v0.3",
+    "research":   "agentrl/ReSearch-Qwen-7B-Instruct",
+    "stepsearch": "Zill1/StepSearch-7B-Instruct",
 }
 
 
@@ -27,7 +30,44 @@ def is_local_finetuned(agentic_model: str, llm_model: str) -> bool:
     return llm_model == FINETUNED_MODEL_MAP.get(agentic_model)
 
 
+# Single source of truth: CLI --agentic-model value → the LLM it runs on.
+# --llm-model is no longer a CLI input; it is derived from this map.
+# The `oss` agent is exposed as two CLI names (oss_20b / oss_120b) so both
+# GPT-OSS variants are selectable; AGENTIC_MODEL_ALIAS maps them back to the
+# internal "oss" agent used by AGENT_MAP / SELF_MANAGED_LLM_AGENTS.
+AGENTIC_MODEL_TO_LLM: Dict[str, str] = {
+    # self-managed (vLLM)
+    "cpm_report":  "openbmb/AgentCPM-Report",
+    "cpm_explore": "openbmb/AgentCPM-Explore",
+    "glm":         "zai-org/GLM-4.7-Flash",
+    "tongyi":      "Alibaba-NLP/Tongyi-DeepResearch-30B-A3B",
+    "oss_20b":     "gpt-oss-20b",
+    "oss_120b":    "gpt-oss-120b",
+    # local-finetuned (vLLM)
+    "webweaver":   "Alibaba-NLP/Tongyi-DeepResearch-30B-A3B",
+    "drtulu":      "rl-research/DR-Tulu-8B",
+    "searchr1":    "PeterJinGo/SearchR1-nq_hotpotqa_train-qwen2.5-7b-it-em-grpo-v0.3",
+    "research":    "agentrl/ReSearch-Qwen-7B-Instruct",
+    "stepsearch":  "Zill1/StepSearch-7B-Instruct",
+    # API-backed instruction-tuned reasoning agents
+    "react":       "claude-sonnet-4-6",
+    "selfask":     "claude-sonnet-4-6",
+    "searcho1":    "claude-sonnet-4-6",
+}
+
+# CLI --agentic-model value → internal agent name (when they differ).
+AGENTIC_MODEL_ALIAS: Dict[str, str] = {
+    "oss_20b":  "oss",
+    "oss_120b": "oss",
+}
+
+
 _IR_ROOT = Path("/mnt/sagemaker-nvme/ir_datasets")
+
+# Root for criteria-augmented datasets that live outside _IR_ROOT.
+# Hardcoded (like _IR_ROOT) rather than derived from __file__ depth, so it is
+# stable regardless of where this package is imported from.
+_DATA_ROOT = Path("/gpfs/home6/data")
 
 # Agents that manage their own LLM connection (direct vLLM/OpenAI clients)
 SELF_MANAGED_LLM_AGENTS = frozenset({"oss", "tongyi", "glm", "cpm_explore", "cpm_report"})

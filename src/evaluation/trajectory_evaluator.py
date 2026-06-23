@@ -93,12 +93,49 @@ def _get_num_docs(step: Dict[str, Any]) -> int:
     return 0
 
 
+# Heavy/stable per-doc fields that are identical every time a doc is surfaced.
+# These are hoisted into a single per-file ``documents`` pool (keyed by doc_id)
+# so the text is stored once instead of once per step that re-surfaces the doc.
+_DOC_POOL_FIELDS = ("title", "contents", "text", "metadata")
+# Text fields dropped entirely when ``save_doc_text`` is False.
+_DOC_TEXT_FIELDS = ("contents", "text")
+
+
+def _clean_doc_for_save(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip redundant fields from a single retrieved-doc dict.
+
+    Removes:
+    - ``_emb`` — embedding vectors (huge, never needed on disk).
+    - ``relevant_text`` — a verbatim copy of ``contents`` (every reader falls
+      back to ``contents``, so this is pure duplication).
+    - ``id`` when ``doc_id`` is also present.
+    - ``metadata.title`` when it duplicates the top-level ``title``.
+    """
+    cleaned = {
+        k: v for k, v in doc.items()
+        if k != "_emb"
+        and k != "relevant_text"
+        and not (k == "id" and "doc_id" in doc)
+    }
+    # Drop metadata entirely if its only content duplicates the top-level title.
+    meta = cleaned.get("metadata")
+    if isinstance(meta, dict):
+        meta = {k: v for k, v in meta.items()
+                if not (k == "title" and v == cleaned.get("title"))}
+        if meta:
+            cleaned["metadata"] = meta
+        else:
+            cleaned.pop("metadata", None)
+    return cleaned
+
+
 def _clean_trajectory_for_save(trajectory: list) -> list:
     """Clean trajectory steps before saving to disk.
 
     Per-step transformations:
     - Remove ``all_docs`` (redundant with ``docs``).
-    - Strip ``_emb`` (embedding vectors) and duplicate ``id`` key from docs.
+    - Strip ``_emb``/``relevant_text``/duplicate ``id``/duplicate
+      ``metadata.title`` from docs (see :func:`_clean_doc_for_save`).
     """
     cleaned_steps = []
     for step in trajectory:
@@ -107,16 +144,102 @@ def _clean_trajectory_for_save(trajectory: list) -> list:
         # Remove all_docs — docs is sufficient
         step.pop("all_docs", None)
 
-        # Strip _emb and duplicate id from docs
         if "docs" in step and step["docs"]:
-            step["docs"] = [
-                {k: v for k, v in doc.items()
-                 if k != "_emb" and not (k == "id" and "doc_id" in doc)}
-                for doc in step["docs"]
-            ]
+            step["docs"] = [_clean_doc_for_save(doc) for doc in step["docs"]]
 
         cleaned_steps.append(step)
     return cleaned_steps
+
+
+def _extract_doc_pool(trajectory: list, save_doc_text: bool) -> tuple:
+    """Hoist heavy/stable doc fields into a shared per-file ``documents`` pool.
+
+    Each step's ``docs`` are reduced to lightweight references that keep only
+    per-step fields (``doc_id``, rank/score, controller fields, …).  The stable
+    fields (``title``, ``contents``, ``text``, ``metadata``) are stored once in
+    the returned pool keyed by ``doc_id``.  A doc retrieved across N steps thus
+    stores its text once instead of N times.
+
+    When *save_doc_text* is False the text fields (``contents``/``text``) are
+    omitted from the pool entirely — trajectory files then carry only doc-id
+    references plus titles, recoverable from the corpus at analysis time.
+
+    Docs without a resolvable ``doc_id`` are left inline (cannot be pooled).
+
+    Returns:
+        ``(trajectory_with_refs, documents_pool)``.
+    """
+    pool: Dict[str, Dict[str, Any]] = {}
+    out_steps = []
+    for step in trajectory:
+        step = dict(step)
+        docs = step.get("docs")
+        if docs:
+            ref_docs = []
+            for doc in docs:
+                did = doc.get("doc_id") or doc.get("id")
+                if not did:
+                    ref_docs.append(doc)  # cannot pool without an id
+                    continue
+                # Collect the stable fields into the pool (once per doc_id).
+                if did not in pool:
+                    entry = {}
+                    for f in _DOC_POOL_FIELDS:
+                        if f in _DOC_TEXT_FIELDS and not save_doc_text:
+                            continue
+                        if f in doc:
+                            entry[f] = doc[f]
+                    pool[did] = entry
+                # Reference keeps only the per-step fields.
+                ref_docs.append({
+                    k: v for k, v in doc.items() if k not in _DOC_POOL_FIELDS
+                })
+            step["docs"] = ref_docs
+        out_steps.append(step)
+    return out_steps, pool
+
+
+def _fold_controller_into_steps(
+    trajectory: list, score_history: Optional[list],
+) -> list:
+    """Attach controller decisions to their matching search step.
+
+    The controller produces one score-history entry per search/post-search
+    evaluation.  These entries are matched positionally to the trajectory's
+    search steps (1:1 in order), so each search step gains the controller's
+    ``controller_action`` (one of continue/intervene/stop) and
+    ``controller_reasoning`` — the same field names the controller uses.
+    Non-search steps and unmatched entries are left untouched.  The full
+    per-iteration signal record remains available separately under
+    ``controller_score_history``.
+    """
+    if not score_history:
+        return trajectory
+
+    by_iter: Dict[Any, Dict[str, Any]] = {}
+    for idx, sc in enumerate(score_history):
+        by_iter[sc.get("iter_num", idx)] = sc
+
+    search_idx = 0
+    out = []
+    for step in trajectory:
+        is_search = bool(
+            step.get("docs") or step.get("all_docs")
+            or step.get("component_doc_ids") or step.get("search_query")
+        )
+        if is_search:
+            sc = by_iter.get(search_idx)
+            if sc is not None and "controller_action" not in step:
+                folded = {}
+                if sc.get("controller_action") is not None:
+                    folded["controller_action"] = sc["controller_action"]
+                if sc.get("controller_reasoning") is not None:
+                    folded["controller_reasoning"] = sc["controller_reasoning"]
+                if folded:
+                    step = {**step, **folded}
+            search_idx += 1
+        out.append(step)
+    return out
 
 
 def _is_search_step(action_type: str, step: Dict[str, Any]) -> bool:
@@ -142,6 +265,21 @@ class TrajectoryEvaluator:
         metrics = evaluator.evaluate(results)
         evaluator.print_results(metrics)
     """
+
+    def __init__(self, save_doc_text: bool = True, dedup_docs: bool = True) -> None:
+        """
+        Args:
+            save_doc_text: When True (default) the full document text is written
+                to the per-query trajectory file.  When False only doc-id
+                references + titles are kept, producing much smaller files
+                (text is recoverable from the corpus at analysis time).
+            dedup_docs:    When True (default) stable per-doc fields are hoisted
+                into a single per-file ``documents`` pool so a doc surfaced in
+                multiple steps stores its text once.  Set False to keep the
+                legacy inline-per-step format.
+        """
+        self.save_doc_text = save_doc_text
+        self.dedup_docs = dedup_docs
 
     # ------------------------------------------------------------------
     # Public API
@@ -246,7 +384,7 @@ class TrajectoryEvaluator:
             total = sum(c.get(atype, 0) for c in action_type_counts_per_query)
             avg_action_type_counts[atype] = round(total / n_queries, 3)
 
-        return {
+        metrics: Dict[str, Any] = {
             "num_queries": n_queries,
             "steps": _stats(total_steps_per_query),
             "search_steps": _stats(search_steps_per_query),
@@ -256,6 +394,25 @@ class TrajectoryEvaluator:
             "queries_with_force_answer": queries_with_force_answer,
             "queries_max_iter_reached": queries_max_iter,
         }
+
+        # Token usage (per-query totals attached by the agents as result["token_usage"])
+        token_usages = [
+            result["token_usage"]
+            for result in results.values()
+            if result.get("token_usage")
+        ]
+        if token_usages:
+            def _tok(key: str) -> List[float]:
+                return [float(tu.get(key, 0) or 0) for tu in token_usages]
+            metrics["tokens"] = {
+                "num_queries_with_tokens": len(token_usages),
+                "input_tokens": _stats(_tok("input_tokens")),
+                "output_tokens": _stats(_tok("output_tokens")),
+                "total_tokens": _stats(_tok("total_tokens")),
+                "llm_calls": _stats(_tok("num_calls")),
+            }
+
+        return metrics
 
     def print_results(self, metrics: Dict[str, Any], header: str = "TRAJECTORY STATISTICS") -> None:
         """Pretty-print trajectory statistics.
@@ -299,6 +456,16 @@ class TrajectoryEvaluator:
         pct_max = (max_iter / n * 100) if n else 0
         print(f"  Queries hitting max iter: {max_iter} ({pct_max:.1f}%)")
 
+        tokens = metrics.get("tokens")
+        if tokens:
+            tot = tokens.get("total_tokens", {})
+            inp = tokens.get("input_tokens", {})
+            out = tokens.get("output_tokens", {})
+            calls = tokens.get("llm_calls", {})
+            print(f"  Tokens/query (total):     {tot.get('mean', 0):.0f} ± {tot.get('std', 0):.0f}"
+                  f"  (in: {inp.get('mean', 0):.0f}, out: {out.get('mean', 0):.0f})")
+            print(f"  LLM calls per query:      {calls.get('mean', 0):.1f}")
+
         action_counts = metrics.get("avg_action_type_counts", {})
         if action_counts:
             print(f"  Action type distribution (avg per query):")
@@ -333,25 +500,53 @@ class TrajectoryEvaluator:
             "num_searches": result.get("num_searches", 0),
             "num_iterations": result.get("num_iterations"),
         }
-        # Preserve agent-specific metadata when present
+        # Preserve agent-specific metadata when present.
+        #
+        # Note: the full ``controller_score_history`` (and its ``*_unique_doc_*``
+        # companions) is deliberately NOT duplicated here — it is persisted once
+        # by ``ControllerEvaluator`` under ``controller/{qid}.json`` and the
+        # controller *decisions* are folded into the search steps below.  The
+        # eval loader reconstructs the history from the controller file on
+        # resume.
         for optional_key in (
             "citation_to_doc_id",
             "cited_docs_ranked_list",
             "memory_bank",
             "query_outputs",       # GTR baseline metadata
-            "tracker_score_history",
-            "tracker_unique_doc_ids",
-            "tracker_unique_doc_count",
+            "token_usage",
         ):
             if optional_key in result and result[optional_key]:
                 item[optional_key] = result[optional_key]
 
-        # Clean trajectory: remove all_docs, add rank/score, strip _emb and duplicate id
+        # Fold controller decisions into their matching search steps so the
+        # trajectory log carries reasoning + query + doc ids + controller values
+        # + tokens in one place.
+        item["trajectory"] = _fold_controller_into_steps(
+            item["trajectory"],
+            result.get("controller_score_history") or result.get("tracker_score_history"),
+        )
+
+        # Clean trajectory: remove all_docs, strip _emb/relevant_text/duplicate id.
         item["trajectory"] = _clean_trajectory_for_save(item["trajectory"])
+
+        # Hoist stable doc fields into a shared pool (dedup across steps) and,
+        # when configured, drop the document text entirely.
+        if self.dedup_docs:
+            item["trajectory"], documents = _extract_doc_pool(
+                item["trajectory"], self.save_doc_text,
+            )
+            if documents:
+                item["documents"] = documents
+        elif not self.save_doc_text:
+            # No pooling, but still honour text suppression by stripping inline.
+            for step in item["trajectory"]:
+                for doc in step.get("docs", []) or []:
+                    for f in _DOC_TEXT_FIELDS:
+                        doc.pop(f, None)
 
         json_path = f"{output_dir_str.rstrip('/')}/{query_id}.json"
         with open(json_path, "w") as f:
-            json.dump(item, f, indent=2, default=str)
+            json.dump(item, f, separators=(",", ":"), default=str)
 
     def save_results(self, metrics: Dict[str, Any], output_path, summary: Optional[Dict[str, Any]] = None, summary_path=None) -> None:
         """Save trajectory statistics and optionally the run summary to JSON files.

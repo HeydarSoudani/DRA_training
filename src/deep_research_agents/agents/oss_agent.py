@@ -17,7 +17,7 @@ import openai
 from pathlib import Path
 
 from .base_agent import BasicAgent
-from prompts.oss.user import QUERY_TEMPLATE
+from deep_research_agents.prompts.oss.user import QUERY_TEMPLATE
 from controller_component.prompts.answer_prompts import FINAL_ANSWER_INSTRUCTION, OSS_FORMAT
 from utils.config import InferenceConfig
 
@@ -43,6 +43,9 @@ class OSS_Agent(BasicAgent):
         self.reasoning_effort = reasoning_effort
         self.verbose = verbose
         self._api_key = os.getenv("OSS_API_KEY", "EMPTY")
+
+        from utils.token_meter import TokenMeter
+        self.token_meter = TokenMeter()
 
         self.inference_config = InferenceConfig(
             api_type="responses_api",
@@ -111,6 +114,7 @@ class OSS_Agent(BasicAgent):
                 request = initial_request.copy()
                 request["input"] = messages
                 response = client.responses.create(**request)
+                self.token_meter.record_usage(getattr(response, "usage", None))
             except Exception as e:
                 logger.warning(f"Iteration {iteration} API error: {e}")
                 self._print("Context limit hit, forcing final answer in conversation")
@@ -272,6 +276,7 @@ class OSS_Agent(BasicAgent):
                             ],
                             "iteration": iteration,
                             "sub_iter": sub_iter,
+                            "tokens": self._step_tokens() if idx == 0 else None,
                         })
                     else:
                         result_text = f"Error: Tool {tool_call['name']} not found"

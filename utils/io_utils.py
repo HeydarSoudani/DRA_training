@@ -97,7 +97,7 @@ def get_processed_queries(run_dir: Union[str, Path]) -> set:
 def load_result_from_trec(trec_file: Union[str, Path], query_id: str) -> dict:
     """Reconstruct a minimal result dict from a saved per-query TREC file.
 
-    The TREC file format written by ``RetrievalEvaluator.save_item`` is::
+    The TREC file format written by ``SurfacedDocEvaluator.save_item`` is::
 
         qid Q0 doc_id rank score iter_N
 
@@ -180,14 +180,32 @@ def load_result_from_saved_files(
         try:
             content = _read_bytes("trajectory", f"{query_id}.json")
             saved = _json_loads(content)
+            trajectory = saved.get("trajectory", [])
+            # Rehydrate the shared ``documents`` pool back into each step's docs.
+            # Stable fields (title/contents/text/metadata) were hoisted at save
+            # time to store each doc's text once instead of once per step.
+            documents = saved.get("documents")
+            if documents:
+                for step in trajectory:
+                    for doc in step.get("docs", []) or []:
+                        did = doc.get("doc_id") or doc.get("id")
+                        pooled = documents.get(did) if did else None
+                        if pooled:
+                            for k, v in pooled.items():
+                                doc.setdefault(k, v)
             result = {
-                "trajectory":   saved.get("trajectory", []),
+                "trajectory":   trajectory,
                 "generation":   saved.get("generation", ""),
                 "num_steps":    saved.get("num_steps", 0),
                 "num_searches": saved.get("num_searches", 0),
             }
             for key in ("citation_to_doc_id", "cited_docs_ranked_list",
-                        "memory_bank", "query_outputs",
+                        "memory_bank", "query_outputs", "token_usage",
+                        # Legacy key names: older runs still inline the controller
+                        # history in the trajectory file.  Newer runs persist it
+                        # only under controller/{qid}.json (loaded in step 6).
+                        "controller_score_history", "controller_unique_doc_ids",
+                        "controller_unique_doc_count",
                         "tracker_score_history", "tracker_unique_doc_ids",
                         "tracker_unique_doc_count"):
                 if key in saved and saved[key]:
@@ -244,4 +262,102 @@ def load_result_from_saved_files(
         except Exception:
             pass
 
+    # ── 6. Load controller history from controller/{qid}.json if absent ──────
+    # Newer runs persist the controller signal history only here (not inlined in
+    # the trajectory file).  Reconstruct the in-memory ``controller_score_history``
+    # list so ControllerEvaluator can aggregate it on resume.
+    if not result.get("controller_score_history") and not result.get("tracker_score_history"):
+        try:
+            content = _read_text("controller", f"{query_id}.json")
+            cdata = _json_loads(content)
+            per_iteration = cdata.get("per_iteration", {})
+            score_history = []
+            for key in sorted(per_iteration, key=lambda x: int(x)):
+                entry = dict(per_iteration[key])
+                entry.setdefault("iter_num", entry.get("iteration"))
+                score_history.append(entry)
+            if score_history:
+                result["controller_score_history"] = score_history
+                result["controller_unique_doc_count"] = cdata.get("unique_doc_count", 0)
+                result["controller_unique_doc_ids"] = cdata.get("unique_doc_ids", [])
+        except (FileNotFoundError, OSError):
+            pass
+        except Exception as e:
+            print(f"Warning: could not load controller JSON for {query_id}: {e}")
+
     return result
+
+
+# ===========================================================================
+# Run / output directory naming
+# ===========================================================================
+
+def build_run_name_for_pipeline(agentic_model: str, llm_model: str, **kwargs) -> str:
+    """Build a consistent output directory name for the current pipeline run.
+
+    Template: {agent_name}_agent_{model}
+    Dataset/retriever/query_key info lives in the parent dataset_dir.
+    """
+    name = agentic_model
+    if agentic_model == "react":
+        name = "react_w_plan" if kwargs.get("use_plan", False) else "react_wo_plan"
+    return f"{name}_agent_{llm_model.replace('/', '--')}"
+
+
+def build_searcher_config_name(**kwargs) -> str:
+    """Build an abbreviated searcher-config directory name.
+
+    Encodes: seen_top_k, post_retrieval_reranker, post_fusion_reranker,
+    rerank_top_k, retrieval_input, post_fusion_reranker_input, controller.
+
+    Example: stk10_prr-null_pfr-bat_rrk100_ri-sq_pfri-oq_ctrl-mon
+    """
+    _reranker_alias = {
+        "null":              "null",
+        "batched_reranker":  "bat",
+        "rankllama":         "rll",
+        "rank1":             "rk1",
+        "qwen3_reranker":    "qw3",
+    }
+    _ri_alias = {
+        "subquery":                "sq",
+        "original_query+subquery": "oq+sq",
+        "reasoning+subquery":      "rs+sq",
+    }
+    _pfri_alias = {
+        "original_query":            "oq",
+        "original_query+subqueries": "oq+sqs",
+        "original_query+reasoning":  "oq+rs",
+        "reasoning+subqueries":      "rs+sqs",
+    }
+    _ctrl_alias = {
+        "off":            "off",
+        "monitor":        "mon",
+        "action":         "act",
+    }
+
+    seen_top_k = kwargs.get("seen_top_k", 10)
+    prr        = kwargs.get("post_retrieval_reranker_name", "null")
+    pfr        = kwargs.get("post_fusion_reranker_name", "batched_reranker")
+    rrk        = kwargs.get("rerank_top_k", 100)
+    ri         = kwargs.get("retrieval_input", "subquery")
+    pfri       = kwargs.get("post_fusion_reranker_input", "original_query")
+    controller_mode = kwargs.get("controller", "monitor")
+    controller_llm     = kwargs.get("llm_controller")
+
+    name = (
+        f"stk{seen_top_k}"
+        f"_prr-{_reranker_alias.get(prr, prr)}"
+        f"_pfr-{_reranker_alias.get(pfr, pfr)}"
+        f"_rrk{rrk}"
+        f"_ri-{_ri_alias.get(ri, ri)}"
+        f"_pfri-{_pfri_alias.get(pfri, pfri)}"
+        f"_ctrl-{_ctrl_alias.get(controller_mode, controller_mode)}"
+    )
+    if controller_mode == "action":
+        _controller_label = controller_llm or kwargs.get("llm_intervene") or "default"
+        _controller_variant = kwargs.get("controller_prompt_variant", "nov_cov_sim")
+        name += f"_cllm-{_controller_label.replace('/', '--')}_cvar-{_controller_variant}"
+    if kwargs.get("ensure_novel_seen_docs", False):
+        name += "_novel"
+    return name

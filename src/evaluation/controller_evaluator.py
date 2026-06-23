@@ -1,9 +1,13 @@
-"""Tracker evaluator: persist and aggregate controller signals.
+"""Controller evaluator: persist and aggregate controller signals.
 
 Saves the per-iteration signal data produced by ``Controller``
-into lightweight JSON files (one per query) under a dedicated ``tracker/``
+into lightweight JSON files (one per query) under a dedicated ``controller/``
 output directory.  These files are designed for direct consumption by the
 analysis code (correlation, plotting) without needing to recompute signals.
+
+Signal and action names mirror the controller exactly
+(``doc_novelty``, ``consec_query_sim``, ``orig_query_sim``, ``marginal_recall``,
+``controller_action`` in {continue, intervene, stop}, ``controller_reasoning``).
 
 Per-query JSON schema::
 
@@ -54,15 +58,20 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-class TrackerEvaluator:
+def _controller_score_history(result: Dict[str, Any]):
+    """Return the controller score history, accepting the legacy key name."""
+    return result.get("controller_score_history") or result.get("tracker_score_history")
+
+
+class ControllerEvaluator:
     """Persist and aggregate controller signal data.
 
     Usage::
 
-        evaluator = TrackerEvaluator()
+        evaluator = ControllerEvaluator()
 
         # Per-query save (inside the query loop)
-        evaluator.save_item(query_id, query_text, result, tracker_dir)
+        evaluator.save_item(query_id, query_text, result, controller_dir)
 
         # Aggregate evaluation (after all queries)
         metrics = evaluator.evaluate(results)
@@ -80,11 +89,12 @@ class TrackerEvaluator:
         result: Dict[str, Any],
         output_dir,
     ) -> None:
-        """Save per-query tracker signals as a JSON file.
+        """Save per-query controller signals as a JSON file.
 
-        Reads ``tracker_score_history``, ``tracker_unique_doc_ids``, and
-        ``tracker_unique_doc_count`` from *result* (attached by
-        ``_attach_tracker_stats`` in the agent mixin).
+        Reads ``controller_score_history``, ``controller_unique_doc_ids``, and
+        ``controller_unique_doc_count`` from *result* (attached by
+        ``_attach_controller_stats`` in the agent mixin; legacy ``tracker_*``
+        keys are still accepted).
 
         Supports both local paths and S3 URIs.
 
@@ -94,7 +104,7 @@ class TrackerEvaluator:
             result:     Unified agent result dict for this query.
             output_dir: Directory where ``{query_id}.json`` will be written.
         """
-        score_history = result.get("tracker_score_history")
+        score_history = _controller_score_history(result)
         if not score_history:
             return
 
@@ -127,14 +137,16 @@ class TrackerEvaluator:
             "qid": query_id,
             "question": question,
             "num_iterations": len(per_iteration),
-            "unique_doc_count": result.get("tracker_unique_doc_count", 0),
-            "unique_doc_ids": result.get("tracker_unique_doc_ids", []),
+            "unique_doc_count": result.get("controller_unique_doc_count",
+                                           result.get("tracker_unique_doc_count", 0)),
+            "unique_doc_ids": result.get("controller_unique_doc_ids",
+                                         result.get("tracker_unique_doc_ids", [])),
             "per_iteration": per_iteration,
         }
 
         json_path = f"{output_dir_str.rstrip('/')}/{query_id}.json"
         with open(json_path, "w") as f:
-            json.dump(item, f, indent=2, default=str)
+            json.dump(item, f, separators=(",", ":"), default=str)
 
     # ------------------------------------------------------------------
     # Aggregate evaluation
@@ -152,7 +164,7 @@ class TrackerEvaluator:
             return {}
 
         # Collect per-query summaries
-        queries_with_tracker = 0
+        queries_with_controller = 0
         total_iterations: List[int] = []
         unique_doc_counts: List[int] = []
 
@@ -167,13 +179,14 @@ class TrackerEvaluator:
         queries_with_candidate = 0
 
         for query_id, result in results.items():
-            score_history = result.get("tracker_score_history")
+            score_history = _controller_score_history(result)
             if not score_history:
                 continue
 
-            queries_with_tracker += 1
+            queries_with_controller += 1
             total_iterations.append(len(score_history))
-            unique_doc_counts.append(result.get("tracker_unique_doc_count", 0))
+            unique_doc_counts.append(result.get("controller_unique_doc_count",
+                                                 result.get("tracker_unique_doc_count", 0)))
 
             query_has_candidate = False
             for scores in score_history:
@@ -193,7 +206,7 @@ class TrackerEvaluator:
             else:
                 queries_no_candidate += 1
 
-        if queries_with_tracker == 0:
+        if queries_with_controller == 0:
             return {}
 
         def _stats(values: List[float]) -> Optional[Dict[str, float]]:
@@ -209,7 +222,7 @@ class TrackerEvaluator:
             }
 
         return {
-            "num_queries_with_tracker": queries_with_tracker,
+            "num_queries_with_controller": queries_with_controller,
             "iterations_per_query": _stats(
                 [float(x) for x in total_iterations]
             ),
@@ -233,19 +246,19 @@ class TrackerEvaluator:
     def print_results(
         self,
         metrics: Dict[str, Any],
-        header: str = "TRACKER STATISTICS",
+        header: str = "CONTROLLER STATISTICS",
     ) -> None:
-        """Pretty-print aggregate tracker statistics."""
+        """Pretty-print aggregate controller statistics."""
         if not metrics:
-            print("  (no tracker data available)")
+            print("  (no controller data available)")
             return
 
         print("\n" + "=" * 80)
         print(header)
         print("=" * 80)
 
-        n = metrics.get("num_queries_with_tracker", 0)
-        print(f"  Queries with tracker data: {n}")
+        n = metrics.get("num_queries_with_controller", 0)
+        print(f"  Queries with controller data: {n}")
 
         def _fmt(d: Optional[Dict]) -> str:
             if not d:

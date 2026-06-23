@@ -527,6 +527,20 @@ def build_references_section(result: dict, max_context_length: int = 300) -> str
 # Documents: citations — extract which docs were cited from an agent result
 # ===========================================================================
 
+def extract_citations_from_text(text: str) -> set[int]:
+    """Extract citation IDs from text (e.g., [1], [22], [6]).
+
+    Args:
+        text: Text containing citation markers like [1], [22], etc.
+
+    Returns:
+        Set of citation IDs found in the text
+    """
+    pattern = r"\[(\d+)\]"
+    matches = re.findall(pattern, text)
+    return set(int(m) for m in matches)
+
+
 def _build_cited_docs_ranked_list(result: dict) -> list:
     """Build a deduplicated, ranked cited-doc list from an agent result.
 
@@ -545,7 +559,6 @@ def _build_cited_docs_ranked_list(result: dict) -> list:
     if citation_to_doc_id:
         final_report = result.get("final_report") or result.get("generation") or ""
         if final_report:
-            from evaluation.citation_evaluator import extract_citations_from_text
             cited_ids_in_report = extract_citations_from_text(final_report)
         else:
             cited_ids_in_report = set()

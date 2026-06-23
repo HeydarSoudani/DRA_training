@@ -31,16 +31,12 @@ Retrieval  : pipeline local retriever  (retriever.retrieve)
 
 import logging
 import re
-import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
-# ── Path setup ────────────────────────────────────────────────────────────────
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # ── Local DR-Tulu artefacts ───────────────────────────────────────────────────
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts" / "drtulu"
@@ -115,9 +111,7 @@ from utils.text_utils import format_as_snippets                                 
 logger = logging.getLogger(__name__)
 
 # ── Real tool implementations ─────────────────────────────────────────────────
-_TOOLS_DIR = Path(__file__).resolve().parent.parent / "agent_tools"
-sys.path.insert(0, str(_TOOLS_DIR.parent))
-from agent_tools import BrowseWebpageTool, SnippetSearchTool  # noqa: E402
+from deep_research_agents.agent_tools import BrowseWebpageTool, SnippetSearchTool  # noqa: E402
 
 # Tool names advertised in the system prompt.
 _SEARCH_TOOLS: Tuple[str, ...] = ("snippet_search", "google_search", "browse_webpage")
@@ -397,6 +391,7 @@ class DrTulu_Agent(BasicAgent):
                 "component_doc_ids": [
                     d.get("doc_id", "") for d in docs[: self.seen_top_k]
                 ],
+                "tokens":            self._step_tokens(),
             })
             if isinstance(tracker_result, TrackerCriticalThinkResult):
                 entry = self._critical_think_to_reasoning_entry(tracker_result)

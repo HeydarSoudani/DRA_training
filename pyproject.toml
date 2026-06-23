@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dra-training"
+version = "0.1.0"
+description = "Deep Research Agents — training and inference pipeline"
+requires-python = ">=3.10"
+readme = "README.md"
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+# Two source roots: project root (utils) and src/ (component packages).
+# Package names are kept stable so import strings remain `utils.*`,
+# `deep_research_agents.*`, etc.
+[tool.setuptools.packages.find]
+where = [".", "src"]
+include = [
+    "utils*",
+    "orchestration*",
+    "deep_research_agents*",
+    "evaluation*",
+    "searcher_component*",
+    "reasoner_component*",
+    "controller_component*",
+    "indexing_corpus_dataset*",
+]

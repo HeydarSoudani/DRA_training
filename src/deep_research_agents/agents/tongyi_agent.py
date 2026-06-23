@@ -433,6 +433,7 @@ class TongyiDR_Agent(BasicAgent):
                                 ],
                                 "iteration": iteration,
                                 "sub_iter": sub_iter,
+                                "tokens": self._step_tokens() if idx == 0 else None,
                             })
 
                             # Per-query tracker: stop evaluating after first non-continue

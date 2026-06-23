@@ -2,16 +2,12 @@
 
 import logging
 import re
-import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.llm_client import LiteLLMClient
-from prompts.searcho1.prompts import (
+from deep_research_agents.prompts.searcho1.prompts import (
     get_multiqa_search_o1_instruction,
     get_task_instruction_openqa,
     get_webpage_to_reasonchain_instruction,
@@ -170,6 +166,7 @@ class SearchO1_Agent(BasicAgent):
                 'search_query': tmp_query,
                 'docs': search_docs,  # all top_k docs — used for TREC file
                 'component_doc_ids': [d.get('doc_id', '') for d in search_docs[:self.seen_top_k]],
+                'tokens': self._step_tokens(),
             })
 
             # Reason in documents

@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import openai
 
 from .base_agent import BasicAgent
-from prompts.glm.user import QUERY_TEMPLATE
+from deep_research_agents.prompts.glm.user import QUERY_TEMPLATE
 from controller_component.prompts.answer_prompts import (
     CANDIDATE_GENERATION_INSTRUCTION,
     FINAL_ANSWER_INSTRUCTION,
@@ -105,6 +105,9 @@ class GLM_Agent(BasicAgent):
         self.max_output_tokens = max_output_tokens
         self.verbose = verbose
         self._api_key = os.getenv("GLM_API_KEY", "EMPTY")
+
+        from utils.token_meter import TokenMeter
+        self.token_meter = TokenMeter()
 
         self.inference_config = InferenceConfig(
             api_type="chat_completion",
@@ -287,6 +290,7 @@ class GLM_Agent(BasicAgent):
 
             if response.usage:
                 self._cumulative_output_tokens += response.usage.completion_tokens or 0
+            self.token_meter.record_usage(getattr(response, "usage", None))
 
             message = response.choices[0].message
             cur_reasoning = getattr(message, "reasoning_content", None)
@@ -411,6 +415,7 @@ class GLM_Agent(BasicAgent):
                             ],
                             "iteration": iteration,
                             "sub_iter": sub_iter,
+                            "tokens": self._step_tokens() if idx == 0 else None,
                         })
                     else:
                         result_text = f"Error: Tool {tc['name']} not found"

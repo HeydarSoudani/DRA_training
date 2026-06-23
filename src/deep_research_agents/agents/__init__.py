@@ -13,7 +13,6 @@ from .webweaver_agent import WebWeaver_Agent
 from .drtulu_agent import DrTulu_Agent
 from .glm_agent import GLM_Agent
 from .oss_agent import OSS_Agent
-from .oss_bedrock_agent import OSS_BedrockAgent, BEDROCK_OSS_MODELS
 from .tongyi_agent import TongyiDR_Agent
 # Registry constants
 REASONING_AGENTS = frozenset({
@@ -65,8 +64,6 @@ __all__ = [
     "DrTulu_Agent",
     "GLM_Agent",
     "OSS_Agent",
-    "OSS_BedrockAgent",
-    "BEDROCK_OSS_MODELS",
     "TongyiDR_Agent",
     "REASONING_AGENTS",
     "CPMExplore",

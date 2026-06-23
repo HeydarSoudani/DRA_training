@@ -1,81 +1,88 @@
 """Evaluation utilities for agentic retrieval research.
 
-Modules
--------
-retrieval_evaluation
-    TREC metric computation (NDCG, MAP, Recall, etc.), result persistence,
-    and the RetrievalEvaluator class for evaluating agents.
-citation_evaluator
-    Citation quality metrics (precision, recall, F1), Recall@N evaluation,
-    and the CitedDocRetrievalEvaluator class for cited-document retrieval.
-per_search_analysis
-    Per-search-step retrieval analysis and plotting.
-latency_tracker
-    Per-component, per-query wall-clock latency tracking.
-efficiency_tracker
-    Aggregate pipeline efficiency metrics (LLM calls, tokens, retriever calls).
+Subsystems
+----------
+retrieval (package)
+    Three document-level evaluators sharing one base class and metric set:
+    SurfacedDocEvaluator (retriever-returned), SeenDocEvaluator (passed to the
+    agent), CitedDocEvaluator (cited by the report), plus the TREC metric
+    functions and the pure citation metric functions
+    (``retrieval.citation_metrics``: precision/recall/F1, Recall@N).  The
+    multi-method fusion evaluation lives in ``retrieval.fusion`` and is imported
+    explicitly (``from evaluation.retrieval.fusion import ...``) to keep
+    ``import evaluation`` free of heavy searcher/indexing dependencies.
+generation (package)
+    ``generation.basic_stats.GenerationEvaluator`` (length, words, citations,
+    optional ROUGE), ``generation.short_answer.ShortAnswerEvaluator``
+    (LLM-as-judge short-answer correctness; alias ``AccuracyEvaluator``), and
+    ``generation.report.ReportEvaluator`` (LLM-judge rubric + citation
+    faithfulness for long-form reports).
+trajectory_evaluator
+    Per-step trajectory statistics (incl. token usage) and persistence.
+controller_evaluator
+    Per-iteration controller-signal persistence and aggregation.
+
+Per-query/per-step token usage is recorded by the agents (via
+``utils.token_meter.TokenMeter`` attached to the LLM clients) and aggregated by
+``TrajectoryEvaluator``.
 """
 
-# Retrieval evaluation (functions + class)
-from .retrieval_evaluation import (
+# Retrieval evaluation (functions + classes; legacy aliases preserved)
+from .retrieval import (
     compute_trec_metrics,
     evaluate_from_ranking_results,
     evaluate_results,
-    save_results,
-    RetrievalEvaluator,
-    SeenDocRetrievalEvaluator,
+    metrics_at_n,
+    BaseDocRetrievalEvaluator,
+    SurfacedDocEvaluator,
+    SeenDocEvaluator,
+    CitedDocEvaluator,
 )
 
-# Citation evaluation (functions + class)
-from .citation_evaluator import (
+# Pure citation metric functions (live under the retrieval subpackage)
+from .retrieval.citation_metrics import (
     extract_citations_from_text,
     compute_citation_metrics,
     evaluate_citation_quality,
     compute_recall_at_n,
-    CitedDocRetrievalEvaluator,
 )
 
 # Generation evaluation
-from .generation_evaluator import GenerationEvaluator
-
-# Accuracy evaluation (LLM-as-judge)
-from .accuracy_evaluator import AccuracyEvaluator
+from .generation import (
+    GenerationEvaluator,
+    ShortAnswerEvaluator,
+    AccuracyEvaluator,
+    ReportEvaluator,
+)
 
 # Trajectory evaluation
 from .trajectory_evaluator import TrajectoryEvaluator
 
-# Tracker evaluation (per-iteration signal persistence)
-from .tracker_evaluator import TrackerEvaluator
-
-# Tracking
-from .latency_tracker import LatencyTracker
-from .efficiency_tracker import EfficiencyTracker
-from .per_search_analysis import PerSearchAnalysis
+# Controller evaluation (per-iteration signal persistence)
+from .controller_evaluator import ControllerEvaluator
 
 __all__ = [
     # Retrieval evaluation
     "compute_trec_metrics",
     "evaluate_from_ranking_results",
     "evaluate_results",
-    "save_results",
-    "RetrievalEvaluator",
-    "SeenDocRetrievalEvaluator",
-    # Citation evaluation
+    "metrics_at_n",
+    "BaseDocRetrievalEvaluator",
+    "SurfacedDocEvaluator",
+    "SeenDocEvaluator",
+    "CitedDocEvaluator",
+    # Citation metric functions
     "extract_citations_from_text",
     "compute_citation_metrics",
     "evaluate_citation_quality",
     "compute_recall_at_n",
-    "CitedDocRetrievalEvaluator",
     # Generation evaluation
     "GenerationEvaluator",
-    # Accuracy evaluation (LLM-as-judge)
+    "ShortAnswerEvaluator",
     "AccuracyEvaluator",
+    "ReportEvaluator",
     # Trajectory evaluation
     "TrajectoryEvaluator",
-    # Tracker evaluation
-    "TrackerEvaluator",
-    # Tracking
-    "LatencyTracker",
-    "EfficiencyTracker",
-    "PerSearchAnalysis",
+    # Controller evaluation
+    "ControllerEvaluator",
 ]

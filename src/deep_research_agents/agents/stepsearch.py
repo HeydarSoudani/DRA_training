@@ -1,14 +1,11 @@
 """StepSearch model with planned searching."""
 
-import sys
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.llm_client import LiteLLMClient
-from prompts.stepsearch.user_prompt import PROMPT_STEPSEARCH
+from deep_research_agents.prompts.stepsearch.user_prompt import PROMPT_STEPSEARCH
 
 from .base_agent import TagReasoningAgent
 

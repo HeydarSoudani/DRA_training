@@ -71,6 +71,9 @@ class HFGenerator(BaseGenerator):
         self.max_tokens = max_tokens
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
+        from utils.token_meter import TokenMeter
+        self.token_meter = TokenMeter()
+
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
@@ -145,6 +148,7 @@ class HFGenerator(BaseGenerator):
                     )
 
             generated = self.tokenizer.decode(outputs[0][input_len:], skip_special_tokens=True)
+            self.token_meter.record(input_len, int(outputs.shape[1]) - input_len)
 
             # Truncate at </action> tag if present (AgentCPM format)
             action_end = generated.find("</action>")

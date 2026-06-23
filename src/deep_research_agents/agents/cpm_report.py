@@ -23,7 +23,7 @@ from typing import List, Dict, Any, Optional
 from jinja2 import Template
 
 from searcher_component.fusion import interleaving_fusion
-from agents.base_agent import BasicAgent
+from deep_research_agents.agents.base_agent import BasicAgent
 from controller_component import TrackerCriticalThinkResult, TrackerEarlyStopResult
 from utils.config import InferenceConfig
 

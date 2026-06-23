@@ -1,11 +1,9 @@
 """ReSearch model with iterative search and reasoning."""
 
 import re
-import sys
 from pathlib import Path
 from typing import Any, Optional
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from utils.llm_client import LiteLLMClient
 _PROMPT_DIR = Path(__file__).parent.parent / "prompts" / "research"

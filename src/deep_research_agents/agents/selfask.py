@@ -2,20 +2,16 @@
 
 import logging
 import re
-import sys
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.llm_client import LiteLLMClient
 
 _PROMPT_DIR = Path(__file__).parent.parent / "prompts" / "selfask"
 SELF_ASK_PROMPT_MULTI_HOP = (_PROMPT_DIR / "system.txt").read_text()
 
-from prompts.selfask.user_prompt import USER_PROMPT as _SELFASK_USER_PROMPT
+from deep_research_agents.prompts.selfask.user_prompt import USER_PROMPT as _SELFASK_USER_PROMPT
 
 from .base_agent import BasicAgent
 from controller_component import TrackerCriticalThinkResult, TrackerEarlyStopResult
@@ -108,6 +104,7 @@ class SelfAsk_Agent(BasicAgent):
             'search_query': search_query,
             'docs': cur_search_docs,  # all top_k docs — used for TREC file
             'component_doc_ids': [d.get('doc_id', '') for d in cur_search_docs[:self.seen_top_k]],
+            'tokens': self._step_tokens(),
         })
 
         output_text = ""
@@ -181,6 +178,7 @@ class SelfAsk_Agent(BasicAgent):
                 'search_query': search_query,
                 'docs': cur_search_docs,  # all top_k docs — used for TREC file
                 'component_doc_ids': [d.get('doc_id', '') for d in cur_search_docs[:self.seen_top_k]],
+                'tokens': self._step_tokens(),
             })
 
             # Early stopping: break loop and force final answer

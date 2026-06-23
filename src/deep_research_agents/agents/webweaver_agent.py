@@ -13,15 +13,11 @@ Retrieval  : pipeline local retriever  (retriever.retrieve)
 
 import logging
 import re
-import sys
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-# ── Path setup ────────────────────────────────────────────────────────────────
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # ── Pipeline imports ──────────────────────────────────────────────────────────
 from utils.llm_client import LiteLLMClient
@@ -30,7 +26,7 @@ from .base_agent import BasicAgent
 from controller_component import TrackerCriticalThinkDeferred, TrackerCriticalThinkResult, TrackerEarlyStopResult
 from utils.config import InferenceConfig
 from utils.text_utils import extract_tag_content as _extract_tag, parse_tool_call_xml
-from prompts.webweaver.user_prompts import (
+from deep_research_agents.prompts.webweaver.user_prompts import (
     PLANNER_USER_TEMPLATE,
     WRITER_USER_TEMPLATE,
 )
@@ -163,14 +159,12 @@ def _parse_tool_call(content: str) -> Optional[Dict[str, Any]]:
 
 def _extract_write_outline(content: str) -> Optional[str]:
     """Extract outline from <write_outline>...</write_outline>."""
-    m = re.search(r"<write_outline>\s*(.*?)\s*</write_outline>", content, re.DOTALL)
-    return m.group(1).strip() if m else None
+    return _extract_tag(content, "write_outline")
 
 
 def _extract_write_block(content: str) -> Optional[str]:
     """Extract section content from <write>...</write>."""
-    m = re.search(r"<write>\s*(.*?)\s*</write>", content, re.DOTALL)
-    return m.group(1).strip() if m else None
+    return _extract_tag(content, "write")
 
 
 def _has_terminate(content: str) -> bool:
@@ -250,6 +244,10 @@ class WebWeaver_Agent(BasicAgent):
         self._search_iter     = 0
         # Reset trajectory tracker for this query (loads per-query qrels)
         self._reset_tracker(query_id=query_id)
+        _meter = self._token_meter()
+        _tok_start = _meter.snapshot() if _meter is not None else None
+        if _meter is not None:
+            _meter.since_last_step()
         try:
             reasoning_path, prediction, citation_to_doc_id = self.inference(query_text, generation_temp=temperature)
 
@@ -266,8 +264,18 @@ class WebWeaver_Agent(BasicAgent):
                 "trajectory": reasoning_path,
                 "citation_to_doc_id": citation_to_doc_id,
             }
-            # Attach trajectory tracker stats when available
-            self._attach_tracker_stats(result)
+            # Attach controller stats when available
+            self._attach_controller_stats(result)
+
+            # Attach per-query token usage when a meter is available.
+            if _meter is not None and _tok_start is not None:
+                _tok_end = _meter.snapshot()
+                result["token_usage"] = {
+                    "input_tokens": _tok_end["input_tokens"] - _tok_start["input_tokens"],
+                    "output_tokens": _tok_end["output_tokens"] - _tok_start["output_tokens"],
+                    "total_tokens": _tok_end["total_tokens"] - _tok_start["total_tokens"],
+                    "num_calls": _tok_end["num_calls"] - _tok_start["num_calls"],
+                }
 
             logger.info(f"  ✓ {num_searches} searches, {len(reasoning_path)} steps, {len(citation_to_doc_id)} cited docs")
             return result

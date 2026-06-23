@@ -16,6 +16,11 @@ class _APIBase(BaseGenerator):
 
     _client: LiteLLMClient
 
+    @property
+    def token_meter(self):
+        """Cumulative token usage of the underlying LiteLLM client."""
+        return self._client.token_meter
+
     def complete(self, messages: List[Dict[str, Any]], **kwargs) -> str:
         return self._client.complete(messages, **kwargs)
 

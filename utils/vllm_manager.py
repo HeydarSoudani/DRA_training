@@ -540,9 +540,6 @@ class VLLMServerManager:
         if agentic_model in _SELF_MANAGED_AGENTS:
             # OSS agent: model variant is determined by --llm-model
             if agentic_model == "oss":
-                from agents.oss_bedrock_agent import BEDROCK_OSS_MODELS
-                if llm_model in BEDROCK_OSS_MODELS:
-                    return None  # routed to Bedrock, no vLLM needed
                 key = f"oss:{llm_model}"
                 if key in _LLM_SERVER_SPECS:
                     return _LLM_SERVER_SPECS[key]

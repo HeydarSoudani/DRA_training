@@ -1,16 +1,12 @@
 """Tools for ReAct retrieval model."""
 
-import sys
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.llm_client import LiteLLMClient
-from prompts.react.plan_create import REACT_PLAN_CREATE_PROMPT
-from prompts.react.plan_update import REACT_PLAN_UPDATE_PROMPT
+from deep_research_agents.prompts.react.plan_create import REACT_PLAN_CREATE_PROMPT
+from deep_research_agents.prompts.react.plan_update import REACT_PLAN_UPDATE_PROMPT
 
 
 class PlanTool:

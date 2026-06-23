@@ -1,21 +1,12 @@
-"""Read dataset from a file.
+"""Read dataset queries and qrels from a dataset directory.
 
-Paths are computed relative to the repository root (derived from this file's
-location) rather than the current working directory. This makes the module
-work regardless of where Python is invoked from.
+All loaders take an explicit ``data_path``, so the module works regardless of
+where Python is invoked from.
 """
 
 from pathlib import Path
 import csv
 import json
-
-from .ranking_results import RankingResults, load_ranking_results
-
-# repo root is three levels up from this file: (data) <- slm_retrieval_research <- src <- repo
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-
-# Data path for WL AALP US dataset
-WL_AALP_US = _REPO_ROOT / "data" / "wl_aalp_us"
 
 
 def load_queries(data_path: Path | str, data_set: str = "set1", query_key: str = "text") -> dict[str, str]:
@@ -105,7 +96,7 @@ def load_query_answers(data_path: Path | str, data_set: str = "set1") -> dict[st
 def load_qrels(
     data_path: Path | str, data_set: str = "set1", min_relevance_score: int | None = None
 ) -> dict[str, dict[str, int]]:
-    """Get path to WL AALP US qrels file.
+    """Load qrels from a dataset directory.
 
     Args:
         data_path: Path to dataset directory (can be local or S3 path)
@@ -163,49 +154,3 @@ def load_qrels(
 
     print(f"Error reading qrels file: No valid file found for {data_path}/qrels/qrels_{data_set}")
     return {}
-
-
-def load_retrievals(data_path: Path | str, data_set: str = "set1") -> RankingResults:
-    """Get path to WL AALP US retrievals file."""
-    if "." not in data_set:
-        data_set += ".json"
-
-    file = f"rr_{data_set}"
-    dirpath = Path(data_path) / "retrieval_ranks"
-    file_path = str(dirpath / file)
-
-    try:
-        return load_ranking_results(file_path)
-    except FileNotFoundError:
-        # Files may be split into multiple files
-        # Try to find and merge all matching split files.
-
-        pattern = file.replace(".", "_*.")
-
-        files = sorted(dirpath.glob(pattern)) if dirpath.exists() else []
-        files = [str(f) for f in files]
-
-        aggregated = RankingResults()
-        for fpath in files:
-            try:
-                rr = load_ranking_results(fpath)
-                aggregated.results.extend(rr.results)
-                aggregated.experiment_info.update(rr.experiment_info or {})
-            except Exception:
-                # Skip malformed split file but continue with others
-                print(f"Warning: failed to load split retrieval file: {fpath}")
-
-        return aggregated
-    except Exception as e:
-        print(f"Error reading retrievals file: {e}")
-        return RankingResults()
-
-
-def load_dataset(
-    data_path: Path | str = WL_AALP_US, data_set: str = "set1"
-) -> tuple[dict[str, str], dict[str, dict[str, int]], RankingResults]:
-    """Load WL AALP US dataset: queries, qrels, retrievals."""
-    queries = load_queries(data_path, data_set)
-    qrels = load_qrels(data_path, data_set)
-    retrievals = load_retrievals(data_path, data_set)
-    return queries, qrels, retrievals

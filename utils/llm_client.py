@@ -22,6 +22,8 @@ import litellm
 from openai import OpenAI, APIError, APIConnectionError, APITimeoutError
 from pydantic import BaseModel
 
+from utils.config import SELF_MANAGED_LLM_AGENTS, is_local_finetuned
+
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +124,9 @@ class LiteLLMClient:
         self.config = {**config, **kwargs}
         self.metadata = metadata or {}
         self._event_loop = None  # Reusable event loop to avoid conflicts
+        # Cumulative token usage across all completion calls on this client.
+        from utils.token_meter import TokenMeter
+        self.token_meter = TokenMeter()
 
     def _get_completion_kwargs(self) -> Dict[str, Any]:
         """Get kwargs for completion calls based on configuration."""
@@ -299,6 +304,7 @@ class LiteLLMClient:
 
             # Call acompletion with kwargs
             response = await litellm.acompletion(**completion_kwargs)
+            self.token_meter.record_usage(getattr(response, "usage", None))
 
             msg = response.choices[0].message
             content = msg.content or ""
@@ -401,6 +407,7 @@ class LiteLLMClient:
 
             # Call acompletion with kwargs
             response = await litellm.acompletion(**completion_kwargs)
+            self.token_meter.record_usage(getattr(response, "usage", None))
 
             # Parse the structured response
             if (
@@ -576,6 +583,7 @@ class LiteLLMClient:
                 del completion_kwargs["max_tokens"]
 
             response = await litellm.acompletion(**completion_kwargs)
+            self.token_meter.record_usage(getattr(response, "usage", None))
 
             msg = response.choices[0].message
             content = msg.content or ""
@@ -840,6 +848,8 @@ class VLLMClient:
         self.model_name = model_name
         self._api_key = api_key
         self._timeout = timeout
+        from utils.token_meter import TokenMeter
+        self.token_meter = TokenMeter()
 
     def call( self, messages: List[Dict[str, str]], *, stop: Optional[List[str]] = None, temperature: float = 0.6, top_p: float = 0.95, presence_penalty: float = 0.0, max_tokens: int = 10000, max_tries: int = 10, error_return: str = "", prepend_reasoning: bool = False, ) -> str:
         """Call the model via OpenAI Chat Completions API with retry + backoff.
@@ -881,6 +891,7 @@ class VLLMClient:
         for attempt in range(max_tries):
             try:
                 chat_response = client.chat.completions.create(**create_kwargs)
+                self.token_meter.record_usage(getattr(chat_response, "usage", None))
                 content = chat_response.choices[0].message.content
 
                 if prepend_reasoning:
@@ -922,3 +933,84 @@ class VLLMClient:
                 time.sleep(sleep_time)
 
         return error_return
+
+
+# ===========================================================================
+# Pipeline LLM-client factories
+# ===========================================================================
+
+def setup_llm_client(
+    model_name: str,
+    temperature: float = 0.7,
+    top_p: float = 1.0,
+    max_completion_tokens: int = 2000,
+    metadata: Optional[Dict[str, Any]] = None,
+    request_timeout: Optional[int] = None,
+):
+    """Setup LLM client for generation tasks.
+
+    Args:
+        model_name: Name of the LLM model to use
+        temperature: Sampling temperature for generation (default: 0.7)
+        top_p: Nucleus sampling parameter (default: 1.0)
+        max_completion_tokens: Maximum tokens to generate (default: 2000)
+        metadata: Optional metadata to attach to LLM calls
+        request_timeout: HTTP request timeout in seconds (default: None, uses LiteLLM default)
+
+    Returns:
+        Configured LiteLLMClient instance
+    """
+    logger.info(f"Setting up LLM client: {model_name}...")
+
+    if metadata is None:
+        metadata = {"model": model_name}
+
+    extra_kwargs = {}
+    if request_timeout is not None:
+        extra_kwargs["request_timeout"] = request_timeout
+
+    llm_client = get_litellm_client(
+        model_name=model_name,
+        temperature=temperature,
+        top_p=top_p,
+        max_completion_tokens=max_completion_tokens,
+        metadata=metadata,
+        **extra_kwargs,
+    )
+
+    logger.info(f"LLM client configured: model={model_name}, temp={temperature}")
+    return llm_client
+
+
+def setup_llm(args, num_gpus: int):
+    """Instantiate the LLM client from parsed CLI args.
+
+    Returns None for self-managed agents, which create their own connection.
+    """
+    llm_client = None
+
+    if args.agentic_model in SELF_MANAGED_LLM_AGENTS:
+        pass
+    elif is_local_finetuned(args.agentic_model, args.llm_model):
+        hf_model = args.llm_model
+        api_base = os.getenv("VLLM_API_BASE", "http://127.0.0.1:6008/v1")
+        llm_client = LiteLLMClient(
+            model=f"openai/{hf_model}",
+            api_base=api_base,
+            api_key="EMPTY",
+            temperature=args.llm_temperature,
+            max_tokens=args.llm_max_tokens_per_call,
+            request_timeout=args.request_timeout,
+        )
+        print(f"Using vLLM-served finetuned model: {hf_model} at {api_base}")
+    else:
+        llm_client = setup_llm_client(
+            model_name=args.llm_model,
+            temperature=args.llm_temperature,
+            top_p=args.llm_top_p,
+            max_completion_tokens=args.llm_max_tokens_per_call,
+            metadata={"model": args.llm_model},
+            request_timeout=args.request_timeout,
+        )
+
+    return llm_client

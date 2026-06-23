@@ -419,3 +419,8 @@ class AccuracyEvaluator:
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(save_data, f, indent=2, default=str)
         print(f"  Saved accuracy results: {output_path_str}")
+
+
+# Canonical name for short-answer-correctness evaluation. ``AccuracyEvaluator``
+# is retained as a backward-compatible alias.
+ShortAnswerEvaluator = AccuracyEvaluator
