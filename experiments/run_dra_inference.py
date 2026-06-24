@@ -1,20 +1,20 @@
 """Run deep research agents pipeline.
 
-Supported agents via --agentic-model:
-    cpm_report      Writing-as-Reasoning agent (CPMReport)
-    searchr1        SearchR1 reasoning agent
-    research        ReSearch reasoning agent
-    stepsearch      StepSearch reasoning agent
-    react           ReAct reasoning agent (use --use-plan for optional planning)
-    selfask         SelfAsk reasoning agent
-    searcho1        SearchO1 reasoning agent
-    webweaver       WebWeaver reasoning agent (finetuned: Alibaba-NLP/Tongyi-DeepResearch-30B-A3B)
-    drtulu          DR-Tulu reasoning agent (finetuned: rl-research/DR-Tulu-8B)
-    glm             GLM reasoning agent (ZhipuAI cloud API)
-    oss_20b         GPT-OSS-20B reasoning agent (OpenAI Responses API / vLLM)
-    oss_120b        GPT-OSS-120B reasoning agent (OpenAI Responses API / vLLM)
-    tongyi          Tongyi-DeepResearch ReAct agent (vLLM)
-    cpm_explore     AgentCPM-Explore deep search agent (vLLM, finetuned: openbmb/AgentCPM-Explore)
+Supported agents via --agentic-model (the LLM is selected automatically per agent):
+    cpm_report      Writing-as-Reasoning agent (CPMReport)         → openbmb/AgentCPM-Report (vLLM)
+    searchr1        SearchR1 reasoning agent                       → PeterJinGo/SearchR1-nq_hotpotqa_train-qwen2.5-7b-it-em-grpo-v0.3 (vLLM)
+    research        ReSearch reasoning agent                       → agentrl/ReSearch-Qwen-7B-Instruct (vLLM)
+    stepsearch      StepSearch reasoning agent                     → Zill1/StepSearch-7B-Instruct (vLLM)
+    react           ReAct reasoning agent (--use-plan optional)    → claude-sonnet-4-6 (API)
+    selfask         SelfAsk reasoning agent                        → claude-sonnet-4-6 (API)
+    searcho1        SearchO1 reasoning agent                       → claude-sonnet-4-6 (API)
+    webweaver       WebWeaver outline agent                        → Alibaba-NLP/Tongyi-DeepResearch-30B-A3B (vLLM)
+    drtulu          DR-Tulu reasoning agent                        → rl-research/DR-Tulu-8B (vLLM)
+    glm             GLM reasoning agent                            → zai-org/GLM-4.7-Flash (vLLM)
+    oss_20b         GPT-OSS-20B reasoning agent                    → gpt-oss-20b (vLLM)
+    oss_120b        GPT-OSS-120B reasoning agent                   → gpt-oss-120b (vLLM)
+    tongyi          Tongyi-DeepResearch ReAct agent                → Alibaba-NLP/Tongyi-DeepResearch-30B-A3B (vLLM)
+    cpm_explore     AgentCPM-Explore deep search agent             → openbmb/AgentCPM-Explore (vLLM)
 
 Agentic workflows:
     ReAct-style (react, selfask, searcho1, research, searchr1, stepsearch, drtulu, glm, oss_20b, oss_120b, tongyi, cpm_explore):
@@ -30,7 +30,7 @@ Agentic workflows:
 
 Output structure:
     run_outputs/{dataset}_{split}_{query_key}_{retriever}/{agent}_agent_{model}/{searcher_config}/
-    e.g. run_outputs/neuclir_2024_news_topic_description_e5/oss_agent_gpt-oss-20b/stk10_prr-null_pfr-bat_rrk100_ri-sq_pfri-oq/
+    e.g. run_outputs/neuclir_2024_news_e5/oss_agent_gpt-oss-20b/stk10_prr-null_pfr-bat_rrk100_ri-sq_pfri-oq/
     ├── retrieval/
     │   └── {query_id}.trec          per-query TREC file (all iterations, col 6 = iter_N)
     ├── generation/
@@ -40,7 +40,9 @@ Output structure:
     ├── controller/
     │   └── {query_id}.json          per-query controller signals: {qid, per_iteration: [...]}
     ├── cited_docs_retrieval/
-    │   └── {query_id}.trec          per-query cited-doc TREC file (docs seen by LLM)
+    │   └── {query_id}.trec          per-query cited-doc TREC file (docs cited by the LLM)
+    ├── seen_docs_retrieval/
+    │   └── {query_id}.trec          per-query seen-doc TREC file (docs shown to the LLM)
     ├── ranking_results.trec
     └── summary.json                 includes "cited_doc_retrieval" section when available
 """
@@ -68,7 +70,7 @@ warnings.filterwarnings("ignore", message=".*AttentionMaskConverter.*")
 logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 logging.getLogger("asyncio.sslproto").setLevel(logging.CRITICAL)
 
-from indexing_corpus_dataset.dataset_loaders import load_queries, load_qrels, load_query_answers
+from indexing_corpus_dataset.dataset_loaders import load_qrels, load_split, resolve_split_id
 
 from deep_research_agents.agents import ALL_AGENTS
 from utils.config import AGENTIC_MODEL_TO_LLM, AGENTIC_MODEL_ALIAS
@@ -82,6 +84,10 @@ from utils.cli_setup import (
     detect_num_gpus,
     assemble_pipeline_kwargs,
     cleanup_event_loop,
+    load_run_config,
+    parse_cli_overrides,
+    apply_config_to_args,
+    _sm_bool,
 )
 from utils.text_utils import build_references_section, _build_cited_docs_ranked_list
 from utils.io_utils import (
@@ -91,9 +97,12 @@ from utils.io_utils import (
     build_searcher_config_name,
 )
 from evaluation.runner import evaluate_and_save, build_evaluators, load_processed_results
-from evaluation.retrieval.fusion import ALL_AGGREGATION_FUSION_METHODS, run_fusion_eval
+from evaluation.retrieval.fusion import run_fusion_eval
 
-_OUTPUT_PREFIX = str(Path(__file__).resolve().parent / "run_outputs")
+_OUTPUT_PREFIX = os.environ.get(
+    "DRA_OUTPUT_ROOT", "/projects/0/prjs0834/heydars/DRA_training/run_outputs"
+)
+_CONFIG_DEFAULT = str(Path(__file__).resolve().parent / "configs" / "default.yaml")
 
 
 # ============================================================================
@@ -104,15 +113,14 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
 
     Args:
         data_path:     Path to dataset directory.
-        subset:        Dataset subset identifier.  None for trec_rag
-                       (year-only); "news", "technical", or "report" for
+        subset:        Dataset subset identifier.  "news" or "technical" for
                        neuclir; "test" for browsecomp_plus.
         dataset_year:  Year of the dataset version (e.g. "2023", "2024").
-                       Used for trec_rag and neuclir.
+                       Used for neuclir.
         query_key:     Key in each JSONL query record to use as the query text.
-                       Defaults to "text" for standard datasets.  For neuclir
-                       use "topic_title", "topic_description", or
-                       "topic_narrative".
+                       Defaults to "text", which is correct for every dataset:
+                       the downloaders flatten each source's best query text
+                       (including NeuCLIR's topic_* fields) into "text".
         output_path:   Root path for saving results (optional).
         agentic_model: Agent to use; one of ALL_AGENTS.
         limit:         Cap the number of queries (for quick tests).
@@ -130,35 +138,29 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
         )
 
     # ==================== Resolve file-level dataset identifier ====================
-    # Build the string used to locate queries/qrels files on disk.
-    # neuclir:         queries_{year}_{subset}.jsonl  →  file_data_set = "{year}_{subset}"
-    # trec_rag:        queries_{year}.tsv             →  file_data_set = "{year}"
-    # browsecomp_plus: queries_{subset}.jsonl         →  file_data_set = "{subset}"
-    dataset = kwargs.pop("dataset", "neuclir")
+    # Build the split string used to locate queries/qrels files on disk
+    # (e.g. "2023_news", "2024", "test"); see resolve_split_id.
+    dataset = kwargs.pop("dataset", "trqa")
     qrels_data_path = kwargs.pop("qrels_data_path", None) or data_path
-    if dataset == "neuclir":
-        file_data_set = f"{dataset_year}_{subset}" if (dataset_year and subset) else (subset or dataset_year or "2024_technical")
-    elif dataset == "trec_rag":
-        file_data_set = dataset_year or subset or "2024"
-    else:  # browsecomp_plus
-        file_data_set = subset or "test"
+    file_data_set = resolve_split_id(dataset, dataset_year, subset)
 
     if query_key is None:
         query_key = "text"
 
     # ==================== Load Dataset ====================
-    queries = load_queries(data_path, file_data_set, query_key=query_key)
+    # Single-pass load of queries + qrels + answers; filter to queries with qrels.
     min_rel_score = kwargs.get("min_relevance_score")
-    qrels = load_qrels(qrels_data_path, file_data_set, min_relevance_score=min_rel_score)
-    answers = load_query_answers(data_path, file_data_set)
+    same_qrels_path = qrels_data_path == data_path
+    queries, qrels, answers = load_split(
+        data_path, file_data_set, query_key=query_key,
+        min_relevance_score=min_rel_score, only_with_qrels=same_qrels_path,
+    )
+    if not same_qrels_path:
+        # qrels live in a separate directory; reload and re-filter against them.
+        qrels = load_qrels(qrels_data_path, file_data_set, min_relevance_score=min_rel_score)
+        queries = {qid: q for qid, q in queries.items() if qid in qrels}
     if answers:
         print(f"Loaded {len(answers)} ground-truth answers (accuracy evaluation available)")
-
-    # Filter to queries that have qrels
-    queries_with_qrels = {qid: q for qid, q in queries.items() if qid in qrels}
-    queries_without_qrels = len(queries) - len(queries_with_qrels)
-    if queries_without_qrels > 0:
-        queries = queries_with_qrels
 
     # Keep the full set of questions for accuracy evaluation (before resume filtering)
     all_questions = dict(queries)
@@ -171,9 +173,7 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
 
     if output_path:
         run_name = build_run_name_for_pipeline(agentic_model=agentic_model, llm_model=llm_model, **kwargs)
-        retriever_name = kwargs.get("retriever_name", "e5")
-        qwen3_size = kwargs.get("qwen3_size", "4B")
-        retriever_label = f"qwen3_emb_{qwen3_size}" if retriever_name == "qwen3_emb" else retriever_name
+        retriever_label = kwargs.get("retriever_name", "e5")
         qk_part = f"_{query_key}" if query_key and query_key != "text" else ""
         dataset_dir = f"{dataset}_{file_data_set}{qk_part}_{retriever_label}"
         searcher_config_name = build_searcher_config_name(**kwargs)
@@ -192,7 +192,7 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
             print(f"Remaining: {len(queries)} queries (skipped {original_count - len(queries)})")
 
         if not queries:
-            print(f"All queries have already been processed — loading results from disk for evaluation")
+            print("All queries already processed — loading results from disk for evaluation")
 
     # ==================== Limit ====================
     if limit is not None and limit > 0:
@@ -580,98 +580,42 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
 # ============================================================================
 # CLI
 # ============================================================================
-def _sm_bool(v):
-    """SageMaker-compatible boolean argument type.
-
-    Accepts bare flags (``--flag``) via ``nargs="?"`` / ``const=True``,
-    as well as explicit string values (``--flag true``) that SageMaker sends
-    when hyperparameters are forwarded as ``--key value`` pairs.
-    """
-    if isinstance(v, bool):
-        return v
-    if v.lower() in ("true", "1", "yes", "t"):
-        return True
-    if v.lower() in ("false", "0", "no", "f"):
-        return False
-    raise argparse.ArgumentTypeError(f"Boolean value expected, got {v!r}")
-
 def _parse_args():
-    """Build and parse the CLI argument parser."""
+    """Build and parse the CLI argument parser.
+
+    Only the frequently-varied knobs are declared as CLI arguments.  The
+    mostly-fixed variables live in a YAML config file (``--config``, default
+    experiments/configs/default.yaml) and are merged onto ``args`` afterwards;
+    any of them can still be overridden by passing the matching ``--flag`` on
+    the command line (handled via ``parse_known_args`` -> ``apply_config_to_args``).
+    """
     parser = argparse.ArgumentParser(
         description="Run deep research agents pipeline (unified)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    # ── Agent ──────────────────────────────────────────────────────
+    # ── File-backed config ─────────────────────────────────────────────────
+    parser.add_argument("--config", type=str, default=_CONFIG_DEFAULT, help="Path to the YAML file holding the mostly-fixed pipeline variables. Any value in it can be overridden by passing the matching --flag on the CLI.")
+
+    # ── Frequently-varied knobs (everything else lives in --config) ─────────
     parser.add_argument("--agentic-model", type=str, default="glm", choices=list(AGENTIC_MODEL_TO_LLM), help="Agent to run; the LLM is selected automatically from the agent. cpm_report = Writing-as-Reasoning (report generation); searchr1/research/stepsearch/react/selfask/searcho1 = Reasoning-augmented retrieval; glm/oss_20b/oss_120b/tongyi = vendor-specific ReAct agents.")
-    # ── LLM ────────────────────────────────────────────────────────────────
-    parser.add_argument("--llm-temperature", type=float, default=0.0, help="Sampling temperature")
-    parser.add_argument("--llm-max-tokens-per-call", type=int, default=10000, help="Max tokens generated per single LLM API call")
-    parser.add_argument("--llm-top-p", type=float, default=1.0, help="Top-p sampling (reasoning agents only)")
-    parser.add_argument("--max-output-tokens-total", type=int, default=20000, help="Cumulative output token budget for the entire agent run per query (oss/glm/tongyi only)")
-    parser.add_argument("--request-timeout", type=int, default=300, help="HTTP request timeout in seconds for LLM API calls")
-    # ── Dataset ────────────────────────────────────────────────────────────
-    parser.add_argument("--dataset", type=str, default="neuclir", choices=["browsecomp_plus", "trec_rag", "neuclir"], help="Dataset. trec_rag/neuclir/browsecomp_plus use local indices.")
-    parser.add_argument("--data-path", type=str, default=None, help="Path to dataset directory (auto-selected if omitted)")
-    parser.add_argument("--subset", type=str, default=None, help="Dataset subset: None for trec_rag; 'news', 'technical', or 'report' for neuclir; 'test' for browsecomp_plus. Auto-selected if omitted.")
-    parser.add_argument("--dataset-year", type=str, default=None, help="Dataset year for trec_rag/neuclir (e.g. '2023', '2024'). Auto-selected if omitted.")
-    parser.add_argument("--query-key", type=str, default=None, help="Key in each JSONL query record to use as the query text. Defaults to 'text' for standard datasets. For neuclir: 'topic_title', 'topic_description', or 'topic_narrative'. Auto-selected if omitted.")
-    parser.add_argument("--qrels-data-path", type=str, default=None, help="Path to load qrels from (defaults to --data-path; auto-selected for criteria-augmented variants)")
-    parser.add_argument("--min-relevance-score", type=int, default=None, help="Minimum relevance score to treat as relevant")
-    parser.add_argument("--limit", type=int, default=None, help="Cap number of queries (for quick tests)")
-    # ── Retriever: public (trec_rag / neuclir / browsecomp_plus) ───────────
-    parser.add_argument("--retriever", type=str, default="qwen3_emb", choices=["bm25", "spladepp", "spladev3", "rerank_l6", "rerank_l12", "contriever", "dpr", "e5", "bge", "qwen3_emb", "agentir_4b"], help="Retriever type for public datasets (trec_rag/neuclir only)")
-    parser.add_argument("--qwen3-size", type=str, default="4B", choices=["0.6B", "4B", "8B"], help="Qwen3-Embedding model size variant (only used when --retriever=qwen3_emb)")
-    parser.add_argument("--index-dir", type=str, default=None, help="Directory with retrieval indices (trec_rag/neuclir only)")
-    parser.add_argument("--corpus-path", type=str, default=None, help="Glob path to corpus files (trec_rag/neuclir only)")
-    parser.add_argument("--top-k", type=int, default=100, help="Documents to retrieve per search")
-    parser.add_argument("--seen-top-k", type=int, default=5, help="Passages passed to planning/writing components. For cpm_report (=20): docs shown per search step. For webweaver(=10): docs added to memory bank per search (after interleaving multi-query results). For glm_agent and oss_agent (=5): docs shown per search step.")
-    # ── Searcher Component ─────────────────────────────--------------------
-    parser.add_argument("--post-retrieval-reranker", type=str, default="null", choices=["null", "batched_reranker", "rankllama", "rank1", "qwen3_reranker", "listwise", "rank_r1", "monot5"], help="Post-retrieval reranking mode: reranks each sub-query's doc list individually before fusion")
-    parser.add_argument("--post-fusion-reranker", type=str, default="null", choices=["null", "batched_reranker", "rankllama", "rank1", "qwen3_reranker", "listwise", "rank_r1", "monot5"], help="Post-fusion reranking mode: reranks the fused list against the original query")
-    parser.add_argument("--rerank-top-k", type=int, default=100, help="Number of top documents to rerank (used by both post-retrieval and post-fusion rerankers)")
-    parser.add_argument("--retrieval-input", type=str, default="subquery", choices=["subquery", "original_query+subquery", "reasoning+subquery"], help="Controls what text is sent to the retriever for each sub-query. 'subquery' (default) uses the raw sub-query; 'original_query+subquery' prepends the original query; 'reasoning+subquery' prepends current trajectory reasoning.")
-    parser.add_argument("--post-fusion-reranker-input", type=str, default="original_query", choices=["original_query", "original_query+subqueries", "original_query+reasoning", "reasoning+subqueries"], help="Controls what text is sent to the post-fusion reranker. 'original_query' (default) uses the original query; 'original_query+subqueries' concatenates the original query with all current sub-queries; 'original_query+reasoning' appends current trajectory reasoning; 'reasoning+subqueries' concatenates current trajectory reasoning with all current sub-queries.")
-    parser.add_argument("--ensure-novel-seen-docs", type=_sm_bool, nargs="?", const=True, default=False, help="When set, the searcher filters out documents already seen in previous iterations before returning results. Guarantees the agent sees seen-top-k novel documents each step.")
-
-    # -- Agents ─────────────────────────────--------------------------------
-    # ── ReAct-specific ───---
-    parser.add_argument("--use-plan", type=_sm_bool, nargs="?", const=True, default=False, help="Enable planning in ReAct agent (create plan before loop, update after each search). Only used when --agentic-model=react.")
-    # ── cpm_report-specific ──
-    parser.add_argument("--max-extend-steps", type=int, default=5, help="Max outline extensions (cpm_report)")
-    parser.add_argument("--with-oracle-outline", type=_sm_bool, nargs="?", const=True, default=False, help="When set, the initial search is skipped and the outline is generated from oracle aspects (gold_retriever_analysis). Path to generation.json is auto-resolved from the dataset config. (cpm_report only)")
-    parser.add_argument("--hard-mode", type=_sm_bool, nargs="?", const=True, default=True, help="Enforce strict validation rules (cpm_report)")
-    
-    # ── Controller ────────────────────────────────────────────────────────
+    parser.add_argument("--dataset", type=str, default="trqa", choices=["trqa", "browsecomp_plus", "neuclir"], help="Dataset. trqa/neuclir/browsecomp_plus use local indices.")
+    parser.add_argument("--retriever", type=str, default="qwen3_emb_4b", choices=["bm25", "spladepp", "spladev3", "rerank_l6", "rerank_l12", "contriever", "dpr", "e5", "bge", "qwen3_emb_0.6b", "qwen3_emb_4b", "qwen3_emb_8b", "agentir_4b"], help="Retriever type for public datasets (neuclir only)")
     parser.add_argument("--controller", type=str, default="action", choices=["off", "monitor", "action"], help="Controller mode. 'off': disabled. 'monitor': compute and log scores only, no intervention. 'action': controller takes corrective actions (intervene/stop) via the controller policy.")
-    parser.add_argument("--llm-controller", type=str, default="claude-sonnet-4-6", help="LLM model for the controller policy (e.g. 'gpt-4.1-mini', 'claude-sonnet-4-6'). When set, overrides --llm-intervene for the controller policy. If not set, falls back to --llm-intervene.")
-    parser.add_argument("--llm-intervene", type=str, default="claude-sonnet-4-6", help="LLM model for generating critical_thinking interventions (e.g. 'gpt-4.1-mini', 'claude-sonnet-4-6'). Required when --controller=action. Uses a lightweight LiteLLMClient separate from the agent's main LLM.")
-    parser.add_argument("--controller-history-window", type=int, default=None, help="Number of recent signal/action history entries shown to the controller policy. None (default) means full history.")
     parser.add_argument("--controller-prompt-variant", type=str, default="nov_cov_sim", choices=["nov", "nov_cov", "nov_sim", "nov_cov_sim", "sim", "cov_sim"], help="Controller policy prompt variant controlling which signals the controller sees. 'nov': novelty only. 'nov_cov': novelty + criteria coverage. 'nov_sim': novelty + consec_query_sim + orig_query_sim. 'nov_cov_sim': novelty + criteria coverage + consec_query_sim + orig_query_sim. 'sim': consec_query_sim (primary) + orig_query_sim (guardrail). 'cov_sim': criteria coverage (primary) + consec_query_sim + orig_query_sim (no novelty). Default: 'nov_cov_sim'.")
-    parser.add_argument("--criteria-coverage-mode", type=str, default=None, choices=["static", "dynamic"], help="Criteria coverage mode. 'static': criteria extracted from query text (e.g. BrowseCompPlus). 'dynamic': LLM decomposes query and updates criteria each iteration.")
-    parser.add_argument("--criteria-coverage-max-criteria", type=int, default=8, help="Soft cap on the number of criteria tracked.")
-    parser.add_argument("--llm-criteria-coverage", type=str, default="claude-sonnet-4-6", help="LLM model for criteria coverage evaluation. Falls back to --llm-controller if not set.")
 
-    # ── Evaluation ─────────────────────────────────────────────────────────
-    parser.add_argument("--k-values", type=str, nargs="+", default=[1, 3, 5, 10, 25, 50, 75, 100, 500, 1000], help="K values for retrieval evaluation metrics")
-    parser.add_argument("--interleaving-window", type=int, default=3, help="Block size for interleaving fusion – consecutive items taken from each list per round (default: 3)")
-    parser.add_argument("--rrf-k", type=int, default=60, help="K parameter for reciprocal rank fusion")
-    parser.add_argument("--fusion-k", type=int, default=100, help="If set, only the first K documents from each list are passed to the fusion method; documents beyond position K are appended via cheap interleaving.")
-    parser.add_argument("--fusion-methods", type=str, nargs="+", default=["interleaving"], choices=ALL_AGGREGATION_FUSION_METHODS, metavar="METHOD", help=f"Subset of aggregation fusion methods to evaluate. If omitted, all methods are run. Choices: {ALL_AGGREGATION_FUSION_METHODS}")
-    parser.add_argument("--judge-api-url", type=str, default=None, help="OpenAI-compatible API base URL for an externally-managed accuracy-evaluation judge server (e.g. http://localhost:6009/v1). When set, the pipeline uses this URL instead of auto-starting its own Qwen3-32B judge server. Start the server with: bash experiments/deep_research_agents/vllm_server_scripts/serve_judge_qwen3.sh")
-
-    # ── Execution & Output ─────────────────────────────────────────────────
-    parser.add_argument("--output", type=str, default=None, help="Root directory for results (defaults to experiments/run_outputs/)")
-    parser.add_argument("--max-iteration", type=int, default=100, help="Max iterations/steps per query (all agents)")
-    parser.add_argument("--max-retries", type=int, default=3, help="Max retries when output format fails (all agents)")
-    parser.add_argument("--verbose", type=_sm_bool, nargs="?", const=True, default=True, help="Print detailed logs")
-    parser.add_argument("--quiet", type=_sm_bool, nargs="?", const=True, default=False, help="Print minimal logs (overrides --verbose)")
+    # ── Run-control flags ───────────────────────────────────────────────────
+    parser.add_argument("--limit", type=int, default=None, help="Cap number of queries (for quick tests)")
     parser.add_argument("--num-gpus", type=int, default=1, help="Number of GPU workers for query-level parallelism. 0 = auto-detect from torch.cuda.device_count(). Each worker loads its own model instance on its assigned GPU.")
-    parser.add_argument("--gpu-ids", type=str, default=None, help="Comma-separated physical GPU IDs for workers (e.g. '4,5,6,7'). Overrides the default 0..num_gpus-1 assignment. Also sets num-gpus to the number of IDs if --num-gpus is 1.")
     parser.add_argument("--eval-only", type=_sm_bool, nargs="?", const=True, default=False, help="Skip agent execution and run only evaluation on already-generated results. Runs all evaluators (generation, trajectory, controller, cited-doc, seen-doc, accuracy, fusion). Requires the run to have been completed at least once so that trajectory/ and retrieval/ files exist. When --judge-api-url is set, also runs accuracy evaluation.")
-    parser.add_argument("--report-eval", type=_sm_bool, nargs="?", const=True, default=False, help="Run the long-form ReportEvaluator (LLM-judge rubric: coverage/relevance/organization, plus citation faithfulness vs qrels). Use for report-style tasks (e.g. cpm_report). Uses the same judge server as accuracy evaluation.")
+    parser.add_argument("--quiet", type=_sm_bool, nargs="?", const=True, default=False, help="Print minimal logs (overrides verbose)")
 
-    args = parser.parse_args()
+    args, extras = parser.parse_known_args()
+
+    # ── Merge file-backed config (+ any CLI overrides) onto args ────────────
+    config = load_run_config(args.config)
+    overrides = parse_cli_overrides(extras)
+    apply_config_to_args(args, config, overrides)
 
     # ── Derive --llm-model from --agentic-model ────────────────────────────
     # --llm-model is not a user input; the agent fully determines the LLM.
@@ -682,14 +626,6 @@ def _parse_args():
 
     if args.output is None:
         args.output = _OUTPUT_PREFIX
-
-    # ── Post-parse: normalise SageMaker-serialised list args ───────────────
-    # SageMaker sends nargs="+" values as a single space-separated string;
-    # split and coerce them so downstream code always sees a proper list.
-    if args.k_values and isinstance(args.k_values[0], str):
-        args.k_values = [int(x) for v in args.k_values for x in v.split()]
-    if args.fusion_methods and len(args.fusion_methods) == 1 and " " in args.fusion_methods[0]:
-        args.fusion_methods = args.fusion_methods[0].split()
 
     return args
 
@@ -717,8 +653,7 @@ def main():
     # ── Resolve --with-oracle-outline to an actual file path ─────────────
     if args.with_oracle_outline:
         _gold_root = Path(__file__).resolve().parent.parent / "gold_retriever_analysis" / "run_outputs"
-        _oracle_retriever = f"qwen3_emb_{args.qwen3_size}" if args.retriever == "qwen3_emb" else args.retriever
-        _oracle_dataset_dir = f"{args.dataset}_{args.dataset_year}_{args.subset}_{_oracle_retriever}"
+        _oracle_dataset_dir = f"{args.dataset}_{args.dataset_year}_{args.subset}_{args.retriever}"
         _oracle_path = _gold_root / _oracle_dataset_dir / "gold_analysis_one_by_one" / "generation.json"
         if _oracle_path.exists():
             args.with_oracle_outline = str(_oracle_path)
@@ -853,26 +788,29 @@ if __name__ == "__main__":
 
 
 # ============================================================================
-# USAGE EXAMPLES
+# OUTPUT STRUCTURE
 # ============================================================================
-#
-# Output structure:
-#   run_outputs/{dataset}_{split}_{query_key}_{retriever}/{agent}_agent_{model}/
-#   e.g. run_outputs/neuclir_2024_news_topic_description_e5/oss_agent_gpt-oss-20b/
+#   run_outputs/{dataset}_{split}_{query_key}_{retriever}/{agent}_agent_{model}/{searcher_config}/
+#   e.g. run_outputs/neuclir_2024_news_e5/oss_agent_gpt-oss-20b/stk10_prr-null_pfr-bat_rrk100_ri-sq_pfri-oq/
 #     ├── retrieval/
 #     │   └── {query_id}.trec   per-query TREC file (all iterations, col 6 = iter_N)
 #     ├── generation/
 #     │   └── {query_id}.md     per-query generation output
 #     ├── trajectory/
 #     │   └── {query_id}.json   per-query trajectory: {qid, question, trajectory}
+#     ├── controller/
+#     │   └── {query_id}.json   per-query controller signals: {qid, per_iteration: [...]}
+#     ├── cited_docs_retrieval/
+#     │   └── {query_id}.trec   per-query cited-doc TREC file (docs cited by the LLM)
+#     ├── seen_docs_retrieval/
+#     │   └── {query_id}.trec   per-query seen-doc TREC file (docs shown to the LLM)
 #     ├── ranking_results.trec
 #     └── summary.json
 #
-# 
-# CUDA_VISIBLE_DEVICES=5,6 python experiments/run_dra_inference.py --dataset browsecomp_plus --limit 1
-#
-# CUDA_VISIBLE_DEVICES=0,1,2 python experiments/run_dra_inference.py --dataset neuclir  --query-key topic_narrative --limit 1
-# python experiments/run_dra_inference.py --dataset neuclir --num-gpus 6 --quiet --limit 6
-# python experiments/run_dra_inference.py --dataset browsecomp_plus --eval-only --num-gpus 8 --quiet --limit 12
-
-# --dataset neuclir --query-key topic_narrative
+# ============================================================================
+# EXAMPLE USAGE
+# ============================================================================
+#   CUDA_VISIBLE_DEVICES=5,6 python experiments/run_dra_inference.py --dataset browsecomp_plus --limit 1
+#   CUDA_VISIBLE_DEVICES=0,1,2 python experiments/run_dra_inference.py --dataset neuclir --limit 1
+#   python experiments/run_dra_inference.py --dataset neuclir --num-gpus 6 --quiet --limit 6
+#   python experiments/run_dra_inference.py --dataset browsecomp_plus --eval-only --num-gpus 8 --quiet --limit 12

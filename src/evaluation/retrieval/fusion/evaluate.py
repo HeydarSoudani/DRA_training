@@ -12,7 +12,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from indexing_corpus_dataset.ranking_results import save_ranking_results
+from utils.ranking_results import save_ranking_results
 
 from ..metrics import evaluate_results
 from .builders import (

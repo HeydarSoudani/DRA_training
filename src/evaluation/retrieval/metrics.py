@@ -13,7 +13,7 @@ from typing import Any, Dict, List
 
 import pytrec_eval
 
-from indexing_corpus_dataset.ranking_results import RankingResults
+from utils.ranking_results import RankingResults
 
 logger = logging.getLogger(__name__)
 

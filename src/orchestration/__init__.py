@@ -48,9 +48,7 @@ def setup_retriever_from_args(args):
         corpus_path=args.corpus_path,
         topk=args.top_k,
     )
-    if args.retriever == "qwen3_emb":
-        config.qwen3_size = getattr(args, 'qwen3_size', '4B')
-    if args.dataset == "browsecomp_plus" and args.retriever == "qwen3_emb":
+    if args.dataset == "browsecomp_plus" and args.retriever.startswith("qwen3_emb"):
         config.retrieval_query_max_length = 8196
     if args.dataset == "browsecomp_plus" and args.retriever == "agentir_4b":
         config.retrieval_query_max_length = 8196
@@ -311,9 +309,7 @@ def _build_components_from_config(worker_config: dict):
         corpus_path=worker_config.get("corpus_path"),
         topk=worker_config["top_k"],
     )
-    if worker_config["retriever_type"] == "qwen3_emb":
-        cfg.qwen3_size = worker_config.get("qwen3_size", "4B")
-    if dataset == "browsecomp_plus" and worker_config["retriever_type"] == "qwen3_emb":
+    if dataset == "browsecomp_plus" and worker_config["retriever_type"].startswith("qwen3_emb"):
         cfg.retrieval_query_max_length = 8196
     retriever_type = worker_config["retriever_type"]
     if retriever_type == "bm25":

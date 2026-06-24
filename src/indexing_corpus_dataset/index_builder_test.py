@@ -13,7 +13,7 @@ and should be retrievable when the index is built properly).
 
 Dataset loading follows run_sequential_pipeline.py conventions:
   - Queries and qrels are loaded from data/{dataset}/ via the dataset module.
-  - Corpus is read from NVME_ROOT (auto-selected per dataset/subset).
+  - Corpus is read from DATA_ROOT (auto-selected per dataset/subset).
 
 Index creation follows index_builder.py conventions:
   - Index_Builder is constructed with all parameters including device_id.
@@ -46,8 +46,9 @@ _project_root = Path(__file__).resolve().parent.parent.parent.parent
 
 from tqdm import tqdm
 
-from indexing_corpus_dataset.index_builder import Index_Builder, MODEL2PATH, MODEL2POOLING, QWEN3_EMB_SIZES, NVME_ROOT
-from indexing_corpus_dataset.dataset_loaders import load_qrels, load_queries
+from indexing_corpus_dataset.index_builder import Index_Builder, MODEL2PATH, MODEL2POOLING
+from indexing_corpus_dataset.layout import DATA_ROOT, corpus_name, trqa_corpus_name
+from indexing_corpus_dataset.dataset_loaders import load_qrels, load_queries, resolve_split_id, resolve_data_path
 
 
 def evaluate_entity_retrieval(retrieved_ids: list, gold_ids: list, k_values: list) -> dict:
@@ -206,9 +207,8 @@ def _parse_args():
 
     # Index builder args (same as index_builder.py).
     # NOTE: use hyphens in option strings (argparse standard); dest uses underscores.
-    parser.add_argument('--retrieval-method', type=str, default='e5', dest='retrieval_method', choices=['bm25', 'spladepp', 'spladev3', 'contriever', 'dpr', 'e5', 'bge', 'qwen3_emb', 'rerank_l6', 'rerank_l12'])
-    parser.add_argument('--qwen3-size', type=str, default='4B', dest='qwen3_size', choices=['0.6B', '4B', '8B'], help='Qwen3 embedding model size variant (only used when retrieval_method=qwen3_emb)')
-    parser.add_argument('--corpus-path', type=str, default=None, dest='corpus_path', help='Path to FULL corpus JSONL (auto-selected from NVME_ROOT if not set)')
+    parser.add_argument('--retrieval-method', type=str, default='e5', dest='retrieval_method', choices=['bm25', 'spladepp', 'spladev3', 'contriever', 'dpr', 'e5', 'bge', 'qwen3_emb_0.6b', 'qwen3_emb_4b', 'qwen3_emb_8b', 'rerank_l6', 'rerank_l12'])
+    parser.add_argument('--corpus-path', type=str, default=None, dest='corpus_path', help='Path to FULL corpus JSONL (auto-selected from DATA_ROOT if not set)')
     parser.add_argument('--save-dir', type=str, default=None, dest='save_dir', help='Directory for test index and outputs (default: temp dir)')
     parser.add_argument('--max-length', type=int, default=512, dest='max_length')
     parser.add_argument('--batch-size', type=int, default=16, dest='batch_size')
@@ -221,12 +221,12 @@ def _parse_args():
     parser.add_argument('--device-id', type=int, default=None, dest='device_id', help='GPU device ID for CUDA systems (e.g., 0, 1). Ignored for MPS.')
 
     # Dataset args (following run_sequential_pipeline.py conventions)
-    parser.add_argument('--dataset', type=str, default='browsecomp_plus', choices=['neuclir', 'trec_rag', 'browsecomp_plus'], help='Dataset name')
+    parser.add_argument('--dataset', type=str, default='trqa', choices=['trqa', 'neuclir', 'browsecomp_plus'], help='Dataset name')
     # Accept both --dataset-year and --data-set (submit_index_builder_test.py uses the latter).
-    parser.add_argument('--dataset-year', '--data-set', type=str, default=None, dest='dataset_year', help='Dataset year (e.g. 2023, 2024). Auto-selected if omitted.')
-    parser.add_argument('--subset', type=str, default=None, help='Dataset subset (e.g. news, technical for neuclir). Auto-selected if omitted.')
+    parser.add_argument('--dataset-year', '--data-set', type=str, default=None, dest='dataset_year', help='Dataset year (e.g. 2023, 2024); for trqa, the eval split (test/validation). Auto-selected if omitted.')
+    parser.add_argument('--subset', type=str, default=None, help='Dataset subset (news/technical for neuclir; wiki1/wiki2/ecommerce for trqa). Auto-selected if omitted.')
     parser.add_argument('--query-key', type=str, default=None, dest='query_key', help='Key in query JSONL records to use as query text. Auto-selected if omitted.')
-    parser.add_argument('--min-relevance-score', type=int, default=None, dest='min_relevance_score', help='Minimum relevance score to treat as relevant (default: 3 for trec_rag/neuclir)')
+    parser.add_argument('--min-relevance-score', type=int, default=None, dest='min_relevance_score', help='Minimum relevance score to treat as relevant (default: 3 for neuclir)')
     parser.add_argument('--query-limit', type=int, default=10, dest='query_limit', help='Max number of queries to use')
     parser.add_argument('--sub-corpus-max-size', type=int, default=3000, dest='sub_corpus_max_size', help='Total sub corpus size: gold passages + distractors up to this many (default: gold only, no limit)')
     parser.add_argument('--data-path', type=str, default=None, dest='data_path', help='Root directory for queries/qrels (local or s3://). When set, overrides the default local data/<dataset>/ lookup. load_queries and load_qrels support S3 paths directly.')
@@ -238,58 +238,55 @@ def main():
     args = _parse_args()
 
     # ── Auto-select dataset args ──
-    if args.dataset_year is None and args.dataset in ["trec_rag", "neuclir"]:
+    if args.dataset_year is None and args.dataset == "neuclir":
         args.dataset_year = "2024"
         print(f"Auto-selected dataset year: {args.dataset_year}")
+
+    # TRQA carries the evaluation split (test/validation) in dataset_year.
+    if args.dataset_year is None and args.dataset == "trqa":
+        args.dataset_year = "test"
+        print(f"Auto-selected eval split: {args.dataset_year}")
 
     if args.subset is None:
         if args.dataset == "neuclir":
             args.subset = "news"
+        elif args.dataset == "trqa":
+            args.subset = "wiki1"
         if args.subset is not None:
             print(f"Auto-selected subset: {args.subset}")
 
     if args.query_key is None:
-        args.query_key = "topic_description" if args.dataset == "neuclir" else "text"
+        # Downloaders flatten each dataset's best query text into the "text"
+        # field (NeuCLIR's topic_* fields are collapsed at download time), so
+        # "text" is the correct key for every dataset.
+        args.query_key = "text"
         print(f"Auto-selected query key: {args.query_key}")
 
     # Auto-adjust max_length for browsecomp_plus + qwen3_emb
-    if args.dataset == "browsecomp_plus" and args.retrieval_method == "qwen3_emb":
+    if args.dataset == "browsecomp_plus" and args.retrieval_method.startswith("qwen3_emb"):
         args.max_length = 4096
-        print(f"Auto-adjusted max_length to {args.max_length} for browsecomp_plus + qwen3_emb")
+        print(f"Auto-adjusted max_length to {args.max_length} for browsecomp_plus + {args.retrieval_method}")
 
     if args.min_relevance_score is None:
-        if args.dataset in ["trec_rag", "neuclir"]:
+        if args.dataset == "neuclir":
             args.min_relevance_score = 3
         elif args.dataset == "browsecomp_plus":
             args.min_relevance_score = 1  # gold=2, evidence=1, skip hard negatives=0
+        elif args.dataset == "trqa":
+            args.min_relevance_score = 1  # binary qrels
 
     # ── Resolve file_data_set ──
-    if args.dataset == "neuclir":
-        file_data_set = (
-            f"{args.dataset_year}_{args.subset}"
-            if (args.dataset_year and args.subset)
-            else (args.subset or args.dataset_year or "2024_news")
-        )
-    elif args.dataset == "trec_rag":
-        file_data_set = args.dataset_year or args.subset or "2024"
-    elif args.dataset == "browsecomp_plus":
-        file_data_set = "test"
-    else:
-        file_data_set = args.subset or "set1"
+    file_data_set = resolve_split_id(args.dataset, args.dataset_year, args.subset)
 
     # ── Auto-select corpus_path (following setup_public_dataset_paths) ──
     if args.corpus_path is None:
-        _shm_root = Path("/dev/shm/ir_datasets")
-        _ir_root = _shm_root if _shm_root.exists() else Path(NVME_ROOT)
+        _ir_root = DATA_ROOT
         if args.dataset == "neuclir":
-            _neuclir_corpus_map = {
-                "news":      "corpus_en_news.jsonl",
-                "technical": "corpus_en_technical.jsonl",
-            }
-            _corpus_file = _neuclir_corpus_map.get(args.subset, f"corpus_en_{args.subset}.jsonl")
+            _corpus_file = f"{corpus_name(args.subset)}.jsonl"
             args.corpus_path = str(_ir_root / "neuclir" / "corpus" / _corpus_file)
-        elif args.dataset == "trec_rag":
-            args.corpus_path = str(_ir_root / "trec_rag" / "corpus" / "*.jsonl")
+        elif args.dataset == "trqa":
+            _corpus_file = f"{trqa_corpus_name(args.subset)}.jsonl"
+            args.corpus_path = str(_ir_root / "trqa" / "corpus" / _corpus_file)
         elif args.dataset == "browsecomp_plus":
             args.corpus_path = str(_ir_root / "browsecomp_plus" / "corpus" / "corpus.jsonl")
         else:
@@ -303,8 +300,6 @@ def main():
 
     # Resolve model path
     args.model_path = MODEL2PATH.get(args.retrieval_method, '')
-    if args.retrieval_method == 'qwen3_emb':
-        args.model_path = QWEN3_EMB_SIZES[args.qwen3_size]
     pooling_method = MODEL2POOLING.get(args.retrieval_method)
 
     print("=" * 70)
@@ -320,16 +315,8 @@ def main():
     if args.data_path:
         data_path = args.data_path  # S3 path or explicit local path
     else:
-        # Match pipeline path resolution: /dev/shm first, then NVME_ROOT,
-        # then repo-local data/{dataset}/ for legacy setups.
-        _shm_data = Path("/dev/shm/ir_datasets") / args.dataset
-        _nvme_data = Path(NVME_ROOT) / args.dataset
-        if _shm_data.exists():
-            data_path = str(_shm_data)
-        elif _nvme_data.exists():
-            data_path = str(_nvme_data)
-        else:
-            data_path = str((_project_root / "data" / args.dataset).resolve())
+        # /dev/shm → NVME → repo-local data/{dataset}/ (shared resolver).
+        data_path = resolve_data_path(args.dataset, project_root=_project_root)
 
     print(f"Loading dataset from {data_path}, split: {file_data_set}")
     queries_dict = load_queries(str(data_path), file_data_set, query_key=args.query_key)
@@ -364,7 +351,7 @@ def main():
         if not gold_ids:
             print("Error: No gold passage IDs found")
             return 1
-        # Expand corpus_path glob if needed (for trec_rag *.jsonl pattern)
+        # Expand corpus_path glob if needed (when a *.jsonl pattern is passed)
         import glob
         corpus_files = sorted(glob.glob(args.corpus_path)) if '*' in args.corpus_path else [args.corpus_path]
         if not corpus_files:
@@ -402,7 +389,6 @@ def main():
         save_embedding=args.save_embedding,
         faiss_gpu=args.faiss_gpu,
         device_id=args.device_id,
-        qwen3_size=getattr(args, 'qwen3_size', None),
     )
     index_builder.build_index()
 
@@ -419,7 +405,7 @@ def main():
     config.index_dir = args.save_dir
     config.retrieval_topk = 1000  # retrieve enough for recall@k
     config.retrieval_batch_size = 32
-    if args.dataset == "browsecomp_plus" and args.retrieval_method == "qwen3_emb":
+    if args.dataset == "browsecomp_plus" and args.retrieval_method.startswith("qwen3_emb"):
         config.retrieval_query_max_length = 8196
     else:
         config.retrieval_query_max_length = 512
@@ -434,8 +420,7 @@ def main():
         retriever = BM25Retriever(config)
     elif args.retrieval_method in ('spladepp', 'spladev3'):
         retriever = SPLADERetriever(config)
-    elif args.retrieval_method in ['contriever', 'dpr', 'e5', 'bge', 'qwen3_emb']:
-        config.qwen3_size = getattr(args, 'qwen3_size', None)
+    elif args.retrieval_method in ['contriever', 'dpr', 'e5', 'bge'] or args.retrieval_method.startswith('qwen3_emb'):
         retriever = DenseRetriever(config)
     else:
         print(f"Error: Unsupported retriever for test: {args.retrieval_method}")
@@ -490,5 +475,4 @@ if __name__ == "__main__":
 
 # python src/agentic_retrieval_research/indexing/index_builder_test.py
 # python src/agentic_retrieval_research/indexing/index_builder_test.py --dataset neuclir --dataset-year 2023 --subset news --retrieval_method bge --query_limit 20
-# python src/agentic_retrieval_research/indexing/index_builder_test.py --dataset trec_rag --dataset-year 2024 --retrieval_method e5 --query_limit 10
 # python src/agentic_retrieval_research/indexing/index_builder_test.py --dataset browsecomp_plus --retrieval_method bge --query_limit 20

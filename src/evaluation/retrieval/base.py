@@ -22,7 +22,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from indexing_corpus_dataset.ranking_results import RankingResults, RankingResult
+from utils.ranking_results import RankingResults, RankingResult
 from searcher_component.fusion import fuse_retrieval_results
 
 from .metrics import evaluate_results, metrics_at_n

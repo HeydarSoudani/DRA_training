@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from indexing_corpus_dataset.ranking_results import RankingResults, RankingResult
+from utils.ranking_results import RankingResults, RankingResult
 from searcher_component.fusion_methods.interleaving import InterleavingFusion
 from searcher_component.fusion_methods.rrf import ReciprocalRankFusion
 from searcher_component.fusion_methods.concatenation import SimpleConcatenation

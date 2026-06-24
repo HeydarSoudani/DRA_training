@@ -33,21 +33,11 @@ MODEL2PATH = {
     "reasonir": 'reasonir/ReasonIR-8B',
     "spladepp": "naver/splade-cocondenser-ensembledistil",
     "spladev3": "naver/splade-v3",
-    "qwen3_emb": "Qwen/Qwen3-Embedding-4B",
+    "qwen3_emb_0.6b": "Qwen/Qwen3-Embedding-0.6B",
+    "qwen3_emb_4b": "Qwen/Qwen3-Embedding-4B",
+    "qwen3_emb_8b": "Qwen/Qwen3-Embedding-8B",
     "agentir_4b": "Tevatron/AgentIR-4B",
 }
-
-QWEN3_EMB_SIZES = {
-    "0.6B": "Qwen/Qwen3-Embedding-0.6B",
-    "4B": "Qwen/Qwen3-Embedding-4B",
-    "8B": "Qwen/Qwen3-Embedding-8B",
-}
-
-def get_qwen3_emb_path(size: str = "4B") -> str:
-    """Return the HuggingFace model path for a Qwen3-Embedding size variant."""
-    if size not in QWEN3_EMB_SIZES:
-        raise ValueError(f"Invalid Qwen3 embedding size '{size}'. Choose from: {list(QWEN3_EMB_SIZES.keys())}")
-    return QWEN3_EMB_SIZES[size]
 
 MODEL2POOLING = {
     "contriever": "mean",
@@ -57,7 +47,9 @@ MODEL2POOLING = {
     "reasonir": 'mean',
     "spladepp": None,
     "spladev3": None,
-    "qwen3_emb": "last_token",
+    "qwen3_emb_0.6b": "last_token",
+    "qwen3_emb_4b": "last_token",
+    "qwen3_emb_8b": "last_token",
     "agentir_4b": "last_token",
 }
 
@@ -164,11 +156,11 @@ def load_corpus(corpus_path: str):
         print('Loading JSONL (this takes a while, one-time cost)...')
         corpus = datasets.load_dataset(
             'json',
-            data_files='/mnt/sagemaker-nvme/ir_datasets/trec_rag/corpus/msmarco_v2.1_doc_segmented_pyserini_format.jsonl',
+            data_files='<corpus_path>',
             split='train'
         )
         print(f'Loaded {len(corpus)} docs. Saving Arrow cache...')
-        corpus.save_to_disk('/mnt/sagemaker-nvme/ir_datasets/trec_rag/corpus/arrow_cache')
+        corpus.save_to_disk('<corpus_dir>/arrow_cache')
         print('Done. Future loads will use the cache.')
         "
 
@@ -466,22 +458,14 @@ class BaseRetriever:
             self.pooling_method = None
             self.retrieval_model_path = MODEL2PATH[config.retriever_name]
         else:
-            # Use size-qualified name for qwen3_emb (e.g. "qwen3_4B_emb")
-            qwen3_size = getattr(config, 'qwen3_size', None)
+            # The retriever name is the index file method (e.g. "qwen3_emb_4b")
             file_method = config.retriever_name
-            if config.retriever_name == 'qwen3_emb' and qwen3_size:
-                file_method = f"qwen3_emb_{qwen3_size}"
             if corpus_stem:
                 self.index_path = f"{config.index_dir}/{corpus_stem}_{file_method}_Flat.index"
             else:
                 self.index_path = f"{config.index_dir}/{file_method}_Flat.index"
             self.retrieval_model_path = MODEL2PATH[config.retriever_name]
             self.pooling_method = MODEL2POOLING[config.retriever_name]
-
-        # Override Qwen3 embedding model path if a size variant is specified
-        qwen3_size = getattr(config, 'qwen3_size', None)
-        if qwen3_size and config.retriever_name == 'qwen3_emb':
-            self.retrieval_model_path = get_qwen3_emb_path(qwen3_size)
 
     def _search(self, query: str, num: int, return_score: bool):
         raise NotImplementedError

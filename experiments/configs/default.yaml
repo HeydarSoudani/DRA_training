@@ -1,0 +1,82 @@
+# ============================================================================
+# Default run configuration for experiments/run_dra_inference.py
+# ============================================================================
+# This file holds the mostly-fixed variables for the DRA inference pipeline.
+# Edit values here instead of passing long command lines.
+#
+# The frequently-varied knobs stay on the CLI and are NOT listed here:
+#   --agentic-model  --dataset  --retriever  --controller
+#   --controller-prompt-variant  --limit  --num-gpus  --eval-only  --quiet
+#
+# Precedence (lowest -> highest):
+#   built-in fallback  <  this file  <  explicit CLI flag
+# So any value below can still be overridden for a single run, e.g.:
+#   python experiments/run_dra_inference.py --dataset neuclir --top-k 50
+#
+# Use a different file with:  --config path/to/other.yaml
+#
+# Auto-derived fields are left as `null` on purpose: when null, they are
+# auto-selected from --dataset at runtime (resolve_dataset_defaults).
+# Note: reranker fields use the STRING "null" (a valid choice), not YAML null.
+# ============================================================================
+
+# ── LLM ─────────────────────────────────────────────────────────────────────
+llm_temperature: 0.0            # Sampling temperature
+llm_max_tokens_per_call: 10000  # Max tokens generated per single LLM API call
+llm_top_p: 1.0                  # Top-p sampling (reasoning agents only)
+max_output_tokens_total: 20000  # Cumulative output-token budget per query (oss/glm/tongyi only)
+request_timeout: 300            # HTTP request timeout (s) for LLM API calls
+
+# ── Dataset (null = auto-selected from --dataset) ────────────────────────────
+data_path: null                 # Path to dataset directory
+subset: null                    # neuclir: news|technical|report; browsecomp_plus: test
+dataset_year: null              # trec_rag/neuclir, e.g. '2023', '2024'
+query_key: null                 # JSONL key for query text. neuclir: topic_title|topic_description|topic_narrative
+qrels_data_path: null           # Path to load qrels from (defaults to data_path)
+min_relevance_score: null       # Minimum relevance score to treat as relevant
+
+# ── Retriever ────────────────────────────────────────────────────────────────
+# Qwen3-Embedding size variants are selected via --retriever (qwen3_emb_0.6b|qwen3_emb_4b|qwen3_emb_8b)
+index_dir: null                 # Directory with retrieval indices (auto-selected if null)
+corpus_path: null               # Glob path to corpus files (auto-selected if null)
+top_k: 100                      # Documents to retrieve per search
+seen_top_k: 5                   # Passages passed to planning/writing components
+
+# ── Searcher component ───────────────────────────────────────────────────────
+# reranker choices: null|batched_reranker|rankllama|rank1|qwen3_reranker|listwise|rank_r1|monot5
+post_retrieval_reranker: "null"          # Reranks each sub-query's doc list before fusion
+post_fusion_reranker: "null"             # Reranks the fused list against the original query
+rerank_top_k: 100                        # Number of top docs to rerank (both rerankers)
+retrieval_input: "subquery"              # subquery | original_query+subquery | reasoning+subquery
+post_fusion_reranker_input: "original_query"  # original_query | original_query+subqueries | original_query+reasoning | reasoning+subqueries
+ensure_novel_seen_docs: false            # Filter docs seen in previous iterations before returning
+
+# ── Agent-specific ───────────────────────────────────────────────────────────
+use_plan: false                 # Enable planning in ReAct agent (only --agentic-model=react)
+max_extend_steps: 5             # Max outline extensions (cpm_report)
+with_oracle_outline: false      # Skip initial search; build outline from oracle aspects (cpm_report)
+hard_mode: true                 # Enforce strict validation rules (cpm_report)
+
+# ── Controller (the rest; --controller and --controller-prompt-variant are CLI) ─
+llm_controller: "claude-sonnet-4-6"        # LLM model for the controller policy
+llm_intervene: "claude-sonnet-4-6"         # LLM model for critical_thinking interventions
+controller_history_window: null            # Recent history entries shown to policy; null = full history
+criteria_coverage_mode: null               # static | dynamic; null = auto (static for browsecomp_plus, else dynamic)
+criteria_coverage_max_criteria: 8          # Soft cap on number of criteria tracked
+llm_criteria_coverage: "claude-sonnet-4-6" # LLM model for criteria coverage evaluation
+
+# ── Evaluation ───────────────────────────────────────────────────────────────
+k_values: [1, 3, 5, 10, 25, 50, 75, 100, 500, 1000]  # K values for retrieval metrics
+interleaving_window: 3          # Block size for interleaving fusion
+rrf_k: 60                       # K parameter for reciprocal rank fusion
+fusion_k: 100                   # Only first K docs per list passed to fusion method
+fusion_methods: ["interleaving"]  # Subset of aggregation fusion methods to evaluate
+judge_api_url: null             # External judge server base URL; null = auto-start own Qwen3-32B judge
+
+# ── Execution & output ───────────────────────────────────────────────────────
+output: null                    # Root dir for results; null = experiments/run_outputs/
+max_iteration: 100              # Max iterations/steps per query (all agents)
+max_retries: 3                  # Max retries when output format fails (all agents)
+verbose: true                   # Print detailed logs
+gpu_ids: null                   # Comma-separated physical GPU IDs, e.g. '4,5,6,7'
+report_eval: false              # Run the long-form ReportEvaluator (LLM-judge rubric)

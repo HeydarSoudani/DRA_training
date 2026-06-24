@@ -31,7 +31,9 @@ MODEL2POOLING = {
     "reasonir": 'mean',
     "spladepp": None,
     "spladev3": None,
-    "qwen3_emb": "last_token",
+    "qwen3_emb_0.6b": "last_token",
+    "qwen3_emb_4b": "last_token",
+    "qwen3_emb_8b": "last_token",
 }
 
 MODEL2PATH = {
@@ -43,16 +45,16 @@ MODEL2PATH = {
     "reasonir": 'reasonir/ReasonIR-8B',
     "spladepp": "naver/splade-cocondenser-ensembledistil",
     "spladev3": "naver/splade-v3",
-    "qwen3_emb": "Qwen/Qwen3-Embedding-4B",
+    "qwen3_emb_0.6b": "Qwen/Qwen3-Embedding-0.6B",
+    "qwen3_emb_4b": "Qwen/Qwen3-Embedding-4B",
+    "qwen3_emb_8b": "Qwen/Qwen3-Embedding-8B",
 }
 
-QWEN3_EMB_SIZES = {
-    "0.6B": "Qwen/Qwen3-Embedding-0.6B",
-    "4B": "Qwen/Qwen3-Embedding-4B",
-    "8B": "Qwen/Qwen3-Embedding-8B",
-}
-
-NVME_ROOT = "/mnt/sagemaker-nvme/ir_datasets"
+# Canonical dataset root (single source of truth in layout.py).
+try:
+    from indexing_corpus_dataset.layout import DATA_ROOT
+except ImportError:  # running as a plain script from inside the package dir
+    from layout import DATA_ROOT
 
 
 def get_device(device_id=None):
@@ -294,13 +296,8 @@ def _encode_shard_worker(rank, world_size, corpus_files, corpus_size, corpus_has
 
 class Index_Builder:
     r"""A tool class used to build an index used in retrieval."""
-    def __init__(self, retrieval_method, model_path, corpus_path, save_dir, max_length, batch_size, use_fp16, pooling_method, faiss_type=None, index_path=None, embedding_path=None, save_embedding=False, faiss_gpu=False, device_id=None, qwen3_size=None):
+    def __init__(self, retrieval_method, model_path, corpus_path, save_dir, max_length, batch_size, use_fp16, pooling_method, faiss_type=None, index_path=None, embedding_path=None, save_embedding=False, faiss_gpu=False, device_id=None):
         self.retrieval_method = retrieval_method.lower()
-        # Effective name for file naming (e.g. "qwen3_4B_emb" instead of "qwen3_emb")
-        if self.retrieval_method == 'qwen3_emb' and qwen3_size:
-            self._file_method = f"qwen3_emb_{qwen3_size}"
-        else:
-            self._file_method = self.retrieval_method
         self.model_path = model_path
         self.corpus_path = corpus_path
         self.save_dir = save_dir
@@ -344,7 +341,7 @@ class Index_Builder:
                 warnings.warn("Some files already exists in save dir and may be overwritten.", UserWarning)
 
         self.index_save_path = index_path if index_path is not None else self._resolve_index_path()
-        self.embedding_save_path = os.path.join(self.save_dir, f"{self.corpus_stem}_{self._file_method}.memmap")
+        self.embedding_save_path = os.path.join(self.save_dir, f"{self.corpus_stem}_{self.retrieval_method}.memmap")
         self.corpus_files = None
         self.corpus_size = 0
         self.corpus_has_title = False
@@ -382,7 +379,7 @@ class Index_Builder:
             return os.path.join(self.save_dir, f"{self.corpus_stem}_spladepp_index")
         if self.retrieval_method == "spladev3":
             return os.path.join(self.save_dir, f"{self.corpus_stem}_spladev3_index")
-        return os.path.join(self.save_dir, f"{self.corpus_stem}_{self._file_method}_{self.faiss_type}.index")
+        return os.path.join(self.save_dir, f"{self.corpus_stem}_{self.retrieval_method}_{self.faiss_type}.index")
 
     def build_index(self):
         r"""Constructing different indexes based on selective retrieval method."""
@@ -774,9 +771,8 @@ class Index_Builder:
 
 def main():
     parser = argparse.ArgumentParser(description="Creating index...")
-    parser.add_argument('--corpus_path', type=str, default=f'/mnt/sagemaker-nvme/ir_datasets/browsecomp_plus/corpus/corpus.jsonl', help='Path to corpus .jsonl file or directory of .jsonl files.')
-    parser.add_argument('--retrieval_method', type=str, default='e5', choices=['bm25', 'spladepp', 'spladev3', 'contriever', 'dpr', 'e5', 'bge', 'reasonir', 'qwen3_emb'])
-    parser.add_argument('--qwen3_size', type=str, default='4B', choices=['0.6B', '4B', '8B'], help='Qwen3 model size variant (only used when retrieval_method=qwen3_emb).')
+    parser.add_argument('--corpus_path', type=str, default=f'{DATA_ROOT}/browsecomp_plus/corpus/corpus.jsonl', help='Path to corpus .jsonl file or directory of .jsonl files.')
+    parser.add_argument('--retrieval_method', type=str, default='e5', choices=['bm25', 'spladepp', 'spladev3', 'contriever', 'dpr', 'e5', 'bge', 'reasonir', 'qwen3_emb_0.6b', 'qwen3_emb_4b', 'qwen3_emb_8b'])
     parser.add_argument('--index_path', type=str, default=None, help='Override path for the output index file/dir. Auto-derived from corpus_path if not set.')
     parser.add_argument('--max_length', type=int, default=512)
     parser.add_argument('--batch_size', type=int, default=16)
@@ -790,17 +786,15 @@ def main():
     args = parser.parse_args()
 
     # Auto-adjust max_length for browsecomp_plus + qwen3_emb
-    if 'browsecomp_plus' in args.corpus_path and args.retrieval_method == 'qwen3_emb':
+    if 'browsecomp_plus' in args.corpus_path and args.retrieval_method.startswith('qwen3_emb'):
         args.max_length = 4096
-        print(f"Auto-adjusted max_length to {args.max_length} for browsecomp_plus + qwen3_emb")
+        print(f"Auto-adjusted max_length to {args.max_length} for browsecomp_plus + {args.retrieval_method}")
 
     # Derive save_dir as {dataset_root}/indices/ (sibling of the corpus/ directory)
     corpus_dir = os.path.dirname(os.path.abspath(args.corpus_path))
     save_dir = os.path.join(os.path.dirname(corpus_dir), "indices")
 
     args.model_path = MODEL2PATH[args.retrieval_method]
-    if args.retrieval_method == 'qwen3_emb':
-        args.model_path = QWEN3_EMB_SIZES[args.qwen3_size]
     pooling_method = MODEL2POOLING.get(args.retrieval_method)
 
     index_builder = Index_Builder(
@@ -818,7 +812,6 @@ def main():
         save_embedding=args.save_embedding,
         faiss_gpu=args.faiss_gpu,
         device_id=args.device_id,
-        qwen3_size=getattr(args, 'qwen3_size', None)
     )
     index_builder.build_index()
 
