@@ -1,0 +1,51 @@
+# Python dependencies for DRA_training
+# Versions pinned to the working environment (Python 3.12).
+
+# --- Core ML / inference ---
+torch==2.6.0
+transformers==4.56.1
+sentence-transformers==3.4.1
+safetensors==0.5.2
+vllm==0.8.3
+numpy==1.26.4
+scipy==1.15.1
+scikit-learn==1.6.1
+pandas==2.2.3
+
+# --- Data / Parquet ---
+# NOTE: pyarrow 19.0.0 has a Parquet reader bug ("Repetition level histogram
+# size mismatch") that breaks loading some HF datasets (e.g. browsecomp-plus).
+# Fixed in 19.0.1+. Pin above the broken release.
+pyarrow>=19.0.1
+datasets==4.0.0
+huggingface_hub==0.34.4
+
+# --- Retrieval / IR ---
+faiss-gpu-cu12==1.10.0          # provides the `faiss` module (use faiss-cpu==1.10.0 on CPU-only hosts)
+pyserini==0.44.0
+pyjnius==1.6.1                  # provides `jnius_config`, required by pyserini
+ir_datasets==0.5.11
+pytrec_eval==0.5
+rouge_score==0.1.2
+
+# --- Rerankers (searcher_component/rerankers) ---
+rank_llm
+tevatron
+
+# --- LLM APIs ---
+openai==1.61.1
+litellm==1.61.0
+
+# --- Utilities ---
+pydantic==2.10.6
+Jinja2==3.1.5
+PyYAML==6.0.2
+json5==0.9.6
+requests==2.32.3
+tqdm==4.67.1
+packaging==23.2
+
+# --- Optional ---
+# orjson is used as a faster JSON loader with a stdlib `json` fallback
+# (see utils/io_utils.py); install for a speed-up.
+# orjson

@@ -1,4 +1,11 @@
 import os
+import sys
+
+# Allow running this file directly by path (python src/.../index_builder.py)
+# in addition to `python -m indexing_corpus_dataset.index_builder`. Both need
+# the package parent (src/) on sys.path so `import indexing_corpus_dataset`
+# resolves; -m adds it automatically, direct execution does not.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Disable safetensors auto-conversion (avoids background thread errors when
 # HuggingFace Hub is unreachable or returns empty responses).
@@ -50,11 +57,12 @@ MODEL2PATH = {
     "qwen3_emb_8b": "Qwen/Qwen3-Embedding-8B",
 }
 
-# Canonical dataset root (single source of truth in layout.py).
-try:
-    from indexing_corpus_dataset.layout import DATA_ROOT
-except ImportError:  # running as a plain script from inside the package dir
-    from layout import DATA_ROOT
+# Canonical dataset root + path derivation (single source of truth in layout.py).
+from indexing_corpus_dataset.layout import (
+    DATA_ROOT,
+    default_corpus_path,
+    default_index_dir,
+)
 
 
 def get_device(device_id=None):
@@ -73,11 +81,11 @@ def get_device(device_id=None):
     else:
         return torch.device("cpu")
 
-def load_model(retrieval_method, model_path: str, use_fp16: bool = False, device=None):
+def load_model(retriever, model_path: str, use_fp16: bool = False, device=None):
     if device is None:
         device = get_device()
 
-    if retrieval_method == 'dpr':
+    if retriever == 'dpr':
         tokenizer = DPRContextEncoderTokenizerFast.from_pretrained(model_path)
         model = DPRContextEncoder.from_pretrained(model_path)
     else:
@@ -85,7 +93,7 @@ def load_model(retrieval_method, model_path: str, use_fp16: bool = False, device
         model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
 
     # Qwen3 embedding models require left padding for last-token pooling
-    if "qwen3" in retrieval_method:
+    if "qwen3" in retriever:
         tokenizer.padding_side = "left"
 
     model.eval()
@@ -171,7 +179,7 @@ def iter_corpus_batches(corpus_files: list[str], batch_size: int):
 
 
 @torch.no_grad()
-def _encode_batch_core(encoder, tokenizer, batch_texts, retrieval_method, pooling_method, max_length, device):
+def _encode_batch_core(encoder, tokenizer, batch_texts, retriever, pooling_method, max_length, device):
     """Encode a single batch of texts, returning a numpy float32 array of embeddings.
 
     Shared by both single-GPU and multi-GPU (per-worker) encoding paths.
@@ -185,23 +193,23 @@ def _encode_batch_core(encoder, tokenizer, batch_texts, retrieval_method, poolin
     )
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
-    if "t5" in retrieval_method:
+    if "t5" in retriever:
         decoder_input_ids = torch.zeros(
             (inputs['input_ids'].shape[0], 1), dtype=torch.long
         ).to(device)
         output = encoder(**inputs, decoder_input_ids=decoder_input_ids, return_dict=True)
         embeddings = output.last_hidden_state[:, 0, :]
-    elif "reasonir" in retrieval_method:
+    elif "reasonir" in retriever:
         output = encoder(**inputs, return_dict=True)
         embeddings = pooling(None, output.last_hidden_state, inputs['attention_mask'], pooling_method)
-    elif "dpr" in retrieval_method:
+    elif "dpr" in retriever:
         output = encoder(**inputs, return_dict=True)
         embeddings = pooling(output.pooler_output, None, None, pooling_method)
-    elif "contriever" in retrieval_method:
+    elif "contriever" in retriever:
         output = encoder(**inputs, return_dict=True)
         embeddings = pooling(None, output.last_hidden_state, inputs['attention_mask'], pooling_method)
         embeddings = torch.nn.functional.normalize(embeddings, dim=-1)
-    elif "qwen3" in retrieval_method:
+    elif "qwen3" in retriever:
         output = encoder(**inputs, return_dict=True)
         embeddings = pooling(None, output.last_hidden_state, inputs['attention_mask'], pooling_method)
         embeddings = torch.nn.functional.normalize(embeddings, dim=-1)
@@ -214,7 +222,7 @@ def _encode_batch_core(encoder, tokenizer, batch_texts, retrieval_method, poolin
 
 
 def _encode_shard_worker(rank, world_size, corpus_files, corpus_size, corpus_has_title,
-                         retrieval_method, model_path, use_fp16, pooling_method,
+                         retriever, model_path, use_fp16, pooling_method,
                          max_length, batch_size, output_path):
     """Worker process: load model on GPU ``rank`` and encode a contiguous shard of the corpus.
 
@@ -235,14 +243,31 @@ def _encode_shard_worker(rank, world_size, corpus_files, corpus_size, corpus_has
         return
 
     print(f"[GPU {rank}] Loading model on cuda:{rank}")
-    encoder, tokenizer = load_model(retrieval_method, model_path, use_fp16, device)
+    encoder, tokenizer = load_model(retriever, model_path, use_fp16, device)
 
-    print(f"[GPU {rank}] Encoding docs [{start_idx:,}, {end_idx:,}) — {n_docs:,} documents")
+    print(f"[GPU {rank}] Encoding docs [{start_idx:,}, {end_idx:,}) — {n_docs:,} documents", flush=True)
     all_embeddings = []
     batch_texts = []
     doc_idx = 0
+    # tqdm's stacked live bars (position=) rely on terminal cursor-control escape
+    # codes; in a non-TTY slurm log those pile up as garbled fragments across the
+    # 4 worker processes. So keep the live bar only on a real terminal and fall
+    # back to clean, append-only milestone lines when writing to a file.
+    is_tty = sys.stderr.isatty()
     pbar = tqdm(total=n_docs, desc=f'GPU-{rank}', miniters=max(1, n_docs // 100),
-                 position=rank, leave=True)
+                 position=rank, leave=True, disable=not is_tty)
+    done = 0
+    log_every = max(batch_size, n_docs // 20)  # ~5% steps
+    next_log = log_every
+
+    def _advance(k):
+        nonlocal done, next_log
+        pbar.update(k)
+        done += k
+        if not is_tty and done >= next_log:
+            print(f"[GPU {rank}] {done:,}/{n_docs:,} ({100 * done / n_docs:.0f}%)", flush=True)
+            while next_log <= done:
+                next_log += log_every
 
     for f in corpus_files:
         if doc_idx >= end_idx:
@@ -260,24 +285,26 @@ def _encode_shard_worker(rank, world_size, corpus_files, corpus_size, corpus_has
                         text = '"' + doc.get('title', '') + '"\n' + doc.get('contents', '')
                     else:
                         text = doc.get('contents', '')
-                    if retrieval_method == "e5":
+                    if retriever == "e5":
                         text = f"passage: {text}"
                     batch_texts.append(text)
 
                     if len(batch_texts) >= batch_size:
                         emb = _encode_batch_core(encoder, tokenizer, batch_texts,
-                                                 retrieval_method, pooling_method, max_length, device)
+                                                 retriever, pooling_method, max_length, device)
                         all_embeddings.append(emb)
-                        pbar.update(len(batch_texts))
+                        _advance(len(batch_texts))
                         batch_texts = []
                 doc_idx += 1
 
     if batch_texts:
         emb = _encode_batch_core(encoder, tokenizer, batch_texts,
-                                 retrieval_method, pooling_method, max_length, device)
+                                 retriever, pooling_method, max_length, device)
         all_embeddings.append(emb)
-        pbar.update(len(batch_texts))
+        _advance(len(batch_texts))
     pbar.close()
+    if not is_tty:
+        print(f"[GPU {rank}] {done:,}/{n_docs:,} (100%) — encoding done", flush=True)
 
     all_embeddings_np = np.concatenate(all_embeddings, axis=0).astype(np.float32)
 
@@ -296,8 +323,8 @@ def _encode_shard_worker(rank, world_size, corpus_files, corpus_size, corpus_has
 
 class Index_Builder:
     r"""A tool class used to build an index used in retrieval."""
-    def __init__(self, retrieval_method, model_path, corpus_path, save_dir, max_length, batch_size, use_fp16, pooling_method, faiss_type=None, index_path=None, embedding_path=None, save_embedding=False, faiss_gpu=False, device_id=None):
-        self.retrieval_method = retrieval_method.lower()
+    def __init__(self, retriever, model_path, corpus_path, save_dir, max_length, batch_size, use_fp16, pooling_method, faiss_type=None, index_path=None, embedding_path=None, save_embedding=False, faiss_gpu=False, device_id=None):
+        self.retriever = retriever.lower()
         self.model_path = model_path
         self.corpus_path = corpus_path
         self.save_dir = save_dir
@@ -333,7 +360,6 @@ class Index_Builder:
         print(f"Batch size: {self.batch_size}")
         print(f"FP16 enabled: {self.use_fp16 and self.device.type == 'cuda'}")
         print(f"{'='*50}\n")
-        print(self.save_dir)
         if not os.path.exists(self.save_dir):
             os.makedirs(self.save_dir)
         else:
@@ -341,12 +367,12 @@ class Index_Builder:
                 warnings.warn("Some files already exists in save dir and may be overwritten.", UserWarning)
 
         self.index_save_path = index_path if index_path is not None else self._resolve_index_path()
-        self.embedding_save_path = os.path.join(self.save_dir, f"{self.corpus_stem}_{self.retrieval_method}.memmap")
+        self.embedding_save_path = os.path.join(self.save_dir, f"{self.corpus_stem}_{self.retriever}.memmap")
         self.corpus_files = None
         self.corpus_size = 0
         self.corpus_has_title = False
-        if self.retrieval_method in {"bm25", "spladepp", "spladev3"}:
-            print(f"Skipping corpus load for {self.retrieval_method}.")
+        if self.retriever in {"bm25", "spladepp", "spladev3"}:
+            print(f"Skipping corpus load for {self.retriever}.")
         elif self.embedding_path is not None:
             print(f"Skipping corpus load - using pre-computed embeddings from {self.embedding_path}")
         else:
@@ -373,19 +399,19 @@ class Index_Builder:
             raise ModuleNotFoundError(f"Required module '{module_name}' is not installed.{hint}")
 
     def _resolve_index_path(self):
-        if self.retrieval_method == "bm25":
+        if self.retriever == "bm25":
             return os.path.join(self.save_dir, f"{self.corpus_stem}_bm25_index")
-        if self.retrieval_method == "spladepp":
+        if self.retriever == "spladepp":
             return os.path.join(self.save_dir, f"{self.corpus_stem}_spladepp_index")
-        if self.retrieval_method == "spladev3":
+        if self.retriever == "spladev3":
             return os.path.join(self.save_dir, f"{self.corpus_stem}_spladev3_index")
-        return os.path.join(self.save_dir, f"{self.corpus_stem}_{self.retrieval_method}_{self.faiss_type}.index")
+        return os.path.join(self.save_dir, f"{self.corpus_stem}_{self.retriever}_{self.faiss_type}.index")
 
     def build_index(self):
         r"""Constructing different indexes based on selective retrieval method."""
-        if self.retrieval_method == "bm25":
+        if self.retriever == "bm25":
             self.build_bm25_index()
-        elif self.retrieval_method in ("spladepp", "spladev3"):
+        elif self.retriever in ("spladepp", "spladev3"):
             self.build_splade_index()
         else:
             self.build_dense_index()
@@ -438,12 +464,12 @@ class Index_Builder:
                     vector_dir = os.path.abspath(self.embedding_path.rstrip(os.sep))
                     use_existing_vectors = True
             if use_existing_vectors:
-                print(f"Using existing {self.retrieval_method} vectors from {vector_dir} (indexing only).")
+                print(f"Using existing {self.retriever} vectors from {vector_dir} (indexing only).")
 
         if not use_existing_vectors:
             if not self.model_path:
-                raise ValueError(f"{self.retrieval_method} requires a valid model path or --embedding_path to vectors.jsonl.")
-            vector_dir = os.path.join(self.save_dir, f"{self.retrieval_method}_vectors")
+                raise ValueError(f"{self.retriever} requires a valid model path or --embedding_path to vectors.jsonl.")
+            vector_dir = os.path.join(self.save_dir, f"{self.retriever}_vectors")
             if os.path.exists(vector_dir):
                 shutil.rmtree(vector_dir)
             os.makedirs(vector_dir, exist_ok=True)
@@ -456,11 +482,11 @@ class Index_Builder:
             if self.use_fp16 and self.device.type == "cuda":
                 model = model.half()
             if self.gpu_num > 1 and self.device.type == "cuda":
-                print(f"Using DataParallel for {self.retrieval_method} encoding across {self.gpu_num} GPUs")
+                print(f"Using DataParallel for {self.retriever} encoding across {self.gpu_num} GPUs")
                 model = torch.nn.DataParallel(model)
                 self.batch_size = self.batch_size * self.gpu_num
 
-            print(f"Encoding corpus with {self.retrieval_method} (batch size: {self.batch_size})...")
+            print(f"Encoding corpus with {self.retriever} (batch size: {self.batch_size})...")
             self._encode_splade_corpus(model, tokenizer, vector_dir)
 
             del model, tokenizer
@@ -481,7 +507,7 @@ class Index_Builder:
             "--pretokenized"
         ]
 
-        print(f"Building Lucene impact index for {self.retrieval_method} outputs...")
+        print(f"Building Lucene impact index for {self.retriever} outputs...")
         subprocess.run(index_cmd, check=True)
 
         if not use_existing_vectors:
@@ -491,7 +517,7 @@ class Index_Builder:
             else:
                 print(f"SPLADE vector dumps preserved at {vector_dir}")
 
-        print(f"Finish! {self.retrieval_method} index stored at {index_dir}")
+        print(f"Finish! {self.retriever} index stored at {index_dir}")
 
     @torch.no_grad()
     def _encode_splade_corpus(self, model, tokenizer, output_dir):
@@ -614,12 +640,12 @@ class Index_Builder:
             else:
                 batch_data = [doc.get('contents', '') for doc in batch_docs]
 
-            if self.retrieval_method == "e5":
+            if self.retriever == "e5":
                 batch_data = [f"passage: {doc}" for doc in batch_data]
 
             embeddings = _encode_batch_core(
                 self.encoder, self.tokenizer, batch_data,
-                self.retrieval_method, self.pooling_method,
+                self.retriever, self.pooling_method,
                 self.max_length, self.device,
             )
             all_embeddings.append(embeddings)
@@ -656,7 +682,7 @@ class Index_Builder:
                 args=(
                     rank, self.gpu_num,
                     self.corpus_files, self.corpus_size, self.corpus_has_title,
-                    self.retrieval_method, self.model_path, self.use_fp16, self.pooling_method,
+                    self.retriever, self.model_path, self.use_fp16, self.pooling_method,
                     self.max_length, self.batch_size, shard_paths[rank],
                 ),
             )
@@ -711,7 +737,7 @@ class Index_Builder:
         if self.embedding_path is not None:
             # Need model briefly to read hidden_size from config
             self.encoder, self.tokenizer = load_model(
-                retrieval_method=self.retrieval_method,
+                retriever=self.retriever,
                 model_path=self.model_path,
                 use_fp16=self.use_fp16,
                 device=self.device,
@@ -729,7 +755,7 @@ class Index_Builder:
             if not use_multi_gpu:
                 # Single device — load model here; encode_all uses self.encoder
                 self.encoder, self.tokenizer = load_model(
-                    retrieval_method=self.retrieval_method,
+                    retriever=self.retriever,
                     model_path=self.model_path,
                     use_fp16=self.use_fp16,
                     device=self.device,
@@ -770,38 +796,76 @@ class Index_Builder:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Creating index...")
-    parser.add_argument('--corpus_path', type=str, default=f'{DATA_ROOT}/browsecomp_plus/corpus/corpus.jsonl', help='Path to corpus .jsonl file or directory of .jsonl files.')
-    parser.add_argument('--retrieval_method', type=str, default='e5', choices=['bm25', 'spladepp', 'spladev3', 'contriever', 'dpr', 'e5', 'bge', 'reasonir', 'qwen3_emb_0.6b', 'qwen3_emb_4b', 'qwen3_emb_8b'])
-    parser.add_argument('--index_path', type=str, default=None, help='Override path for the output index file/dir. Auto-derived from corpus_path if not set.')
-    parser.add_argument('--max_length', type=int, default=512)
-    parser.add_argument('--batch_size', type=int, default=16)
-    parser.add_argument('--faiss_type', type=str, default='Flat')
-    parser.add_argument('--embedding_path', type=str, default=None, help='Path to pre-computed embeddings (.memmap). Skips encoding if set.')
-    parser.add_argument('--save_embedding', type=lambda x: x.lower() != 'false', default=True)
-    parser.add_argument('--use_fp16', type=lambda x: x.lower() != 'false', default=True)
-    parser.add_argument('--faiss_gpu', type=lambda x: x.lower() == 'true', default=False)
-    parser.add_argument('--device_id', type=int, default=None, help='GPU device ID for CUDA systems (e.g., 0, 1). Ignored for MPS.')
+    from indexing_corpus_dataset.index_config import (
+        BUILD_DEFAULTS, BUILD_CONFIG_DEFAULT, resolve_index_config, resolve_split_defaults,
+    )
 
-    args = parser.parse_args()
+    parser = argparse.ArgumentParser(description="Creating index...")
+    parser.add_argument('--config', type=str, default=BUILD_CONFIG_DEFAULT, help='Path to the YAML config holding the mostly-fixed index-build variables. Any value in it can be overridden by passing the matching --flag.')
+    parser.add_argument('--retriever', type=str, default='qwen3_emb_4b', dest='retriever', choices=['bm25', 'spladepp', 'spladev3', 'contriever', 'dpr', 'e5', 'bge', 'reasonir', 'qwen3_emb_0.6b', 'qwen3_emb_4b', 'qwen3_emb_8b'])
+    parser.add_argument('--dataset', type=str, default='browsecomp_plus', choices=['trqa', 'neuclir', 'browsecomp_plus'], help='Dataset name; corpus and index paths are derived from it.')
+
+    args, extras = parser.parse_known_args()
+
+    # Merge file-backed config (+ any CLI overrides) onto args.
+    resolve_index_config(args, BUILD_DEFAULTS, extras)
+
+    # Auto-select dataset_year / subset left null in config.
+    resolve_split_defaults(args)
+
+    # Auto-derive corpus_path from dataset/subset (the corpus stem encodes the
+    # subset, so the saved index is named per dataset/subset by Index_Builder).
+    if args.corpus_path is None:
+        args.corpus_path = str(default_corpus_path(
+            args.dataset, args.subset, partial=args.trqa_partial))
+        print(f"Auto-selected corpus path: {args.corpus_path}")
 
     # Auto-adjust max_length for browsecomp_plus + qwen3_emb
-    if 'browsecomp_plus' in args.corpus_path and args.retrieval_method.startswith('qwen3_emb'):
+    if args.dataset == 'browsecomp_plus' and args.retriever.startswith('qwen3_emb'):
         args.max_length = 4096
-        print(f"Auto-adjusted max_length to {args.max_length} for browsecomp_plus + {args.retrieval_method}")
+        print(f"Auto-adjusted max_length to {args.max_length} for browsecomp_plus + {args.retriever}")
 
     # Derive save_dir as {dataset_root}/indices/ (sibling of the corpus/ directory)
-    corpus_dir = os.path.dirname(os.path.abspath(args.corpus_path))
-    save_dir = os.path.join(os.path.dirname(corpus_dir), "indices")
+    if args.save_dir is None:
+        args.save_dir = str(default_index_dir(args.dataset))
+        print(f"Auto-selected save dir: {args.save_dir}")
 
-    args.model_path = MODEL2PATH[args.retrieval_method]
-    pooling_method = MODEL2POOLING.get(args.retrieval_method)
+    args.model_path = MODEL2PATH[args.retriever]
+    pooling_method = MODEL2POOLING.get(args.retriever)
+
+    # Consolidated hyperparameter banner — printed once, at the top, before any
+    # corpus loading / encoding so the run's full config is the first thing in
+    # the log.
+    print("\n" + "=" * 60)
+    print("INDEX BUILD CONFIGURATION")
+    print("=" * 60)
+    for k, v in [
+        ("retriever", args.retriever),
+        ("model_path", args.model_path),
+        ("pooling_method", pooling_method),
+        ("dataset", args.dataset),
+        ("subset", args.subset),
+        ("dataset_year", args.dataset_year),
+        ("corpus_path", args.corpus_path),
+        ("save_dir", args.save_dir),
+        ("index_path", args.index_path),
+        ("embedding_path", args.embedding_path),
+        ("max_length", args.max_length),
+        ("batch_size", args.batch_size),
+        ("faiss_type", args.faiss_type),
+        ("faiss_gpu", args.faiss_gpu),
+        ("use_fp16", args.use_fp16),
+        ("save_embedding", args.save_embedding),
+        ("device_id", args.device_id),
+    ]:
+        print(f"  {k:<16}: {v}")
+    print("=" * 60 + "\n")
 
     index_builder = Index_Builder(
-        retrieval_method=args.retrieval_method,
+        retriever=args.retriever,
         model_path=args.model_path,
         corpus_path=args.corpus_path,
-        save_dir=save_dir,
+        save_dir=args.save_dir,
         max_length=args.max_length,
         batch_size=args.batch_size,
         use_fp16=args.use_fp16,
@@ -823,6 +887,7 @@ if __name__ == "__main__":
 # --- Example usage ---
 #
 # Index and embedding files are saved in {dataset_root}/indices/ (sibling of corpus/).
-# Naming: {corpus_stem}_{retrieval_method}_{faiss_type}.index / .memmap
+# Naming: {corpus_stem}_{retriever}_{faiss_type}.index / .memmap
 #
-# python src/agentic_retrieval_research/indexing/index_builder.py
+# python src/indexing_corpus_dataset/index_builder.py
+# python src/indexing_corpus_dataset/index_builder.py --dataset browsecomp_plus --retriever bge

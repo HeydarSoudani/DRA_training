@@ -25,8 +25,37 @@ low-level ``utils.config`` — can import it without pulling heavy dependencies.
 import os
 from pathlib import Path
 
+
+def _load_dra_env_defaults() -> None:
+    """Populate ``DRA_*`` env vars from the project-root ``.env`` if unset.
+
+    Every entry point imports this module (inference CLI, downloaders, index
+    builder), but the standalone scripts never call ``python-dotenv``, and
+    ~/.bashrc is not sourced in non-interactive SLURM jobs.  This tiny,
+    dependency-free reader makes ``DRA_DATA_ROOT`` / ``DRA_OUTPUT_ROOT`` set in
+    ``.env`` take effect everywhere.  A real environment value always wins, so
+    exporting the var (shell or sbatch) still overrides ``.env``.
+    """
+    env_file = Path(__file__).resolve().parents[2] / ".env"
+    if not env_file.is_file():
+        return
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key.startswith("DRA_") and key not in os.environ:
+            value = value.split("#", 1)[0].strip().strip('"').strip("'")
+            if value:
+                os.environ[key] = value
+
+
+_load_dra_env_defaults()
+
 # The one canonical dataset root.  Defaults to the cluster project location but
-# can be overridden with the ``DRA_DATA_ROOT`` env var (no code edit needed).
+# can be overridden with the ``DRA_DATA_ROOT`` env var (no code edit needed) —
+# set it in the shell, in an sbatch script, or in the project-root ``.env``.
 # Hardcoded default (not derived from ``__file__`` depth) so it is stable
 # regardless of where the package is imported from.
 DATA_ROOT = Path(os.environ.get(
@@ -142,3 +171,35 @@ def resolve_data_path(dataset: str, project_root: Path | str | None = None) -> s
         return str(candidate)
     base = Path(project_root) if project_root is not None else Path.cwd()
     return str((base / "data" / dataset).resolve())
+
+
+# ===========================================================================
+# Index-build path derivation (corpus + index dir from dataset/subset)
+# ===========================================================================
+
+def default_corpus_path(
+    dataset: str, subset: str | None = None, *, partial: bool = True
+) -> Path:
+    """Canonical full-corpus JSONL path for a dataset/subset under ``DATA_ROOT``.
+
+    The corpus file stem encodes the subset (NeuCLIR ``corpus_en_news``, TRQA
+    ``wiki_partial``/``ecommerce``), so an index built from this path is already
+    named per dataset/subset by ``Index_Builder``.  Used by both the production
+    index builder and its test to avoid passing ``--corpus-path`` by hand.
+    """
+    if dataset == "neuclir":
+        return DATA_ROOT / "neuclir" / "corpus" / f"{corpus_name(subset)}.jsonl"
+    if dataset == "trqa":
+        return DATA_ROOT / "trqa" / "corpus" / f"{trqa_corpus_name(subset, partial)}.jsonl"
+    if dataset == "browsecomp_plus":
+        return DATA_ROOT / "browsecomp_plus" / "corpus" / "corpus.jsonl"
+    # Unknown dataset: best-effort canonical location.
+    return DATA_ROOT / dataset / "corpus" / "corpus.jsonl"
+
+
+def default_index_dir(dataset: str) -> Path:
+    """Canonical index output directory for a dataset, ``DATA_ROOT/{dataset}/indices``.
+
+    Sibling of the ``corpus/`` directory, matching the production layout.
+    """
+    return DATA_ROOT / dataset / "indices"

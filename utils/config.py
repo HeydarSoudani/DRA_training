@@ -5,7 +5,6 @@ without triggering circular dependencies.
 """
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Dict, Optional
 
 
@@ -65,11 +64,6 @@ AGENTIC_MODEL_ALIAS: Dict[str, str] = {
 # Canonical dataset root — single source of truth in indexing_corpus_dataset.layout
 # (import-light, so this stays safe to import from anywhere).
 from indexing_corpus_dataset.layout import DATA_ROOT as _IR_ROOT
-
-# Root for criteria-augmented datasets that live outside _IR_ROOT.
-# Hardcoded (like _IR_ROOT) rather than derived from __file__ depth, so it is
-# stable regardless of where this package is imported from.
-_DATA_ROOT = Path("/gpfs/home6/data")
 
 # Agents that manage their own LLM connection (direct vLLM/OpenAI clients)
 SELF_MANAGED_LLM_AGENTS = frozenset({"oss", "tongyi", "glm", "cpm_explore", "cpm_report"})

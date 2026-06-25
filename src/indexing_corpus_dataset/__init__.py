@@ -22,6 +22,8 @@ from .layout import (
     corpus_name,
     resolve_split_id,
     resolve_data_path,
+    default_corpus_path,
+    default_index_dir,
 )
 from .dataset_loaders import (
     load_queries,
@@ -42,4 +44,6 @@ __all__ = [
     "qrels_base",
     "corpus_path",
     "corpus_name",
+    "default_corpus_path",
+    "default_index_dir",
 ]

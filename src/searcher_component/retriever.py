@@ -73,7 +73,7 @@ def get_device(device_id=None):
     else:
         return torch.device("cpu")
 
-def load_model(retrieval_method, model_path: str, use_fp16: bool = False, device=None):
+def load_model(retriever, model_path: str, use_fp16: bool = False, device=None):
     if device is None:
         device = get_device()
 
@@ -85,7 +85,7 @@ def load_model(retrieval_method, model_path: str, use_fp16: bool = False, device
                                      not str(device).startswith("mps")) else torch.float32
     device_map = {"": str(device)}
 
-    if retrieval_method == 'dpr':
+    if retriever == 'dpr':
         tokenizer = DPRQuestionEncoderTokenizerFast.from_pretrained(model_path)
         model = DPRQuestionEncoder.from_pretrained(
             model_path, torch_dtype=torch_dtype, device_map=device_map
@@ -97,7 +97,7 @@ def load_model(retrieval_method, model_path: str, use_fp16: bool = False, device
         )
 
     # Qwen3 embedding models and AgentIR require left padding for last-token pooling
-    if "qwen3" in retrieval_method or "agentir" in retrieval_method:
+    if "qwen3" in retriever or "agentir" in retriever:
         tokenizer.padding_side = "left"
 
     model.eval()
@@ -321,7 +321,7 @@ class Encoder:
         self.device = device if device is not None else get_device()
 
         self.model, self.tokenizer = load_model(
-            retrieval_method=self.model_name,
+            retriever=self.model_name,
             model_path = self.model_path,
             use_fp16 = self.use_fp16,
             device = self.device

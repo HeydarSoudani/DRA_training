@@ -18,25 +18,29 @@ Dataset loading follows run_sequential_pipeline.py conventions:
 Index creation follows index_builder.py conventions:
   - Index_Builder is constructed with all parameters including device_id.
 
-Inputs: Same as index_builder.py plus:
-  - --dataset / --dataset-year / --subset: identify the dataset split
-  - --query-key: key in query JSONL records to use as query text
-  - --min-relevance-score: minimum qrel score to treat as relevant
-  - --query_limit: Optional limit on number of queries to use (default: 10)
-  - --sub_corpus_max_size: Total sub corpus size (gold passages + distractors). If set, e.g. 1000,
-    the sub corpus has 1000 passages total: all gold passages for the queries plus non-gold
-    distractors to reach 1000. If not set, sub corpus = gold passages only.
+Inputs: Only --retriever and --dataset are CLI knobs; everything else
+lives in the YAML config (configs/index_build_test.yaml) and can still be
+overridden ad-hoc with --key value. Config keys include:
+  - dataset_year / subset: identify the dataset split (null = auto)
+  - query_key: key in query JSONL records to use as query text
+  - min_relevance_score: minimum qrel score to treat as relevant
+  - query_limit: limit on number of queries to use (default: 10)
+  - sub_corpus_max_size: total sub corpus size (gold passages + distractors). If
+    set, e.g. 1000, the sub corpus has 1000 passages total: all gold passages
+    for the queries plus non-gold distractors to reach 1000. If null, sub corpus
+    = gold passages only.
 
 Usage:
-  python src/agentic_retrieval_research/indexing/index_builder_test.py \\
-    --retrieval_method bge \\
-    --dataset neuclir \\
-    --dataset-year 2023 \\
-    --subset news \\
-    --query_limit 20
+  python src/indexing_corpus_dataset/index_builder_test.py \\
+    --retriever bge \\
+    --dataset neuclir
+  # override a config key for one run:
+  python src/indexing_corpus_dataset/index_builder_test.py \\
+    --dataset neuclir --subset technical --query-limit 20
 """
 
 import os
+import sys
 import json
 import argparse
 import tempfile
@@ -44,11 +48,21 @@ from pathlib import Path
 
 _project_root = Path(__file__).resolve().parent.parent.parent.parent
 
+# Allow running this file directly by path (without `-m`): ensure the package
+# root (src/, which contains the indexing_corpus_dataset package) is on sys.path
+# so the absolute `indexing_corpus_dataset.*` imports below resolve.
+_package_root = str(Path(__file__).resolve().parent.parent)
+if _package_root not in sys.path:
+    sys.path.insert(0, _package_root)
+
 from tqdm import tqdm
 
 from indexing_corpus_dataset.index_builder import Index_Builder, MODEL2PATH, MODEL2POOLING
-from indexing_corpus_dataset.layout import DATA_ROOT, corpus_name, trqa_corpus_name
+from indexing_corpus_dataset.layout import default_corpus_path
 from indexing_corpus_dataset.dataset_loaders import load_qrels, load_queries, resolve_split_id, resolve_data_path
+from indexing_corpus_dataset.index_config import (
+    TEST_DEFAULTS, TEST_CONFIG_DEFAULT, resolve_index_config, resolve_split_defaults,
+)
 
 
 def evaluate_entity_retrieval(retrieved_ids: list, gold_ids: list, k_values: list) -> dict:
@@ -194,66 +208,32 @@ def run_retrieval_and_evaluate(retriever, queries: list, qrels: dict, k_values: 
     return results
 
 
-def _str2bool(v):
-    """Accept 'true'/'false' strings (SageMaker passes all hyperparams as strings)."""
-    if isinstance(v, bool):
-        return v
-    return v.strip().lower() in ('true', '1', 'yes')
-
-
 def _parse_args():
-    """Build and parse the CLI argument parser."""
+    """Build and parse the CLI argument parser.
+
+    Only ``--retriever`` and ``--dataset`` are CLI knobs; everything else
+    lives in the YAML config (``--config``) and can still be overridden ad-hoc
+    with ``--key value`` (handled via parse_known_args -> resolve_index_config).
+    """
     parser = argparse.ArgumentParser(description="Index builder test: small corpus -> index -> retrieval -> recall")
 
-    # Index builder args (same as index_builder.py).
-    # NOTE: use hyphens in option strings (argparse standard); dest uses underscores.
-    parser.add_argument('--retrieval-method', type=str, default='e5', dest='retrieval_method', choices=['bm25', 'spladepp', 'spladev3', 'contriever', 'dpr', 'e5', 'bge', 'qwen3_emb_0.6b', 'qwen3_emb_4b', 'qwen3_emb_8b', 'rerank_l6', 'rerank_l12'])
-    parser.add_argument('--corpus-path', type=str, default=None, dest='corpus_path', help='Path to FULL corpus JSONL (auto-selected from DATA_ROOT if not set)')
-    parser.add_argument('--save-dir', type=str, default=None, dest='save_dir', help='Directory for test index and outputs (default: temp dir)')
-    parser.add_argument('--max-length', type=int, default=512, dest='max_length')
-    parser.add_argument('--batch-size', type=int, default=16, dest='batch_size')
-    parser.add_argument('--faiss-type', type=str, default='Flat', dest='faiss_type')
-    parser.add_argument('--embedding-path', type=str, default=None, dest='embedding_path')
-    # Boolean flags accept "true"/"false" strings so SageMaker hyperparameters work.
-    parser.add_argument('--save-embedding', type=_str2bool, default=True, dest='save_embedding')
-    parser.add_argument('--use-fp16', type=_str2bool, default=True, dest='use_fp16')
-    parser.add_argument('--faiss-gpu', type=_str2bool, default=False, dest='faiss_gpu')
-    parser.add_argument('--device-id', type=int, default=None, dest='device_id', help='GPU device ID for CUDA systems (e.g., 0, 1). Ignored for MPS.')
+    parser.add_argument('--config', type=str, default=TEST_CONFIG_DEFAULT, help='Path to the YAML config holding the mostly-fixed test variables. Any value in it can be overridden by passing the matching --flag.')
+    parser.add_argument('--retriever', type=str, default='qwen3_emb_4b', dest='retriever', choices=['bm25', 'spladepp', 'spladev3', 'contriever', 'dpr', 'e5', 'bge', 'qwen3_emb_0.6b', 'qwen3_emb_4b', 'qwen3_emb_8b', 'rerank_l6', 'rerank_l12'])
+    parser.add_argument('--dataset', type=str, default='browsecomp_plus', choices=['trqa', 'neuclir', 'browsecomp_plus'], help='Dataset name; corpus and index paths are derived from it.')
 
-    # Dataset args (following run_sequential_pipeline.py conventions)
-    parser.add_argument('--dataset', type=str, default='trqa', choices=['trqa', 'neuclir', 'browsecomp_plus'], help='Dataset name')
-    # Accept both --dataset-year and --data-set (submit_index_builder_test.py uses the latter).
-    parser.add_argument('--dataset-year', '--data-set', type=str, default=None, dest='dataset_year', help='Dataset year (e.g. 2023, 2024); for trqa, the eval split (test/validation). Auto-selected if omitted.')
-    parser.add_argument('--subset', type=str, default=None, help='Dataset subset (news/technical for neuclir; wiki1/wiki2/ecommerce for trqa). Auto-selected if omitted.')
-    parser.add_argument('--query-key', type=str, default=None, dest='query_key', help='Key in query JSONL records to use as query text. Auto-selected if omitted.')
-    parser.add_argument('--min-relevance-score', type=int, default=None, dest='min_relevance_score', help='Minimum relevance score to treat as relevant (default: 3 for neuclir)')
-    parser.add_argument('--query-limit', type=int, default=10, dest='query_limit', help='Max number of queries to use')
-    parser.add_argument('--sub-corpus-max-size', type=int, default=3000, dest='sub_corpus_max_size', help='Total sub corpus size: gold passages + distractors up to this many (default: gold only, no limit)')
-    parser.add_argument('--data-path', type=str, default=None, dest='data_path', help='Root directory for queries/qrels (local or s3://). When set, overrides the default local data/<dataset>/ lookup. load_queries and load_qrels support S3 paths directly.')
+    args, extras = parser.parse_known_args()
 
-    return parser.parse_args()
+    # Merge file-backed config (+ any CLI overrides) onto args.
+    resolve_index_config(args, TEST_DEFAULTS, extras)
+
+    return args
 
 
 def main():
     args = _parse_args()
 
-    # ── Auto-select dataset args ──
-    if args.dataset_year is None and args.dataset == "neuclir":
-        args.dataset_year = "2024"
-        print(f"Auto-selected dataset year: {args.dataset_year}")
-
-    # TRQA carries the evaluation split (test/validation) in dataset_year.
-    if args.dataset_year is None and args.dataset == "trqa":
-        args.dataset_year = "test"
-        print(f"Auto-selected eval split: {args.dataset_year}")
-
-    if args.subset is None:
-        if args.dataset == "neuclir":
-            args.subset = "news"
-        elif args.dataset == "trqa":
-            args.subset = "wiki1"
-        if args.subset is not None:
-            print(f"Auto-selected subset: {args.subset}")
+    # ── Auto-select dataset_year / subset (shared with index_builder.py) ──
+    resolve_split_defaults(args)
 
     if args.query_key is None:
         # Downloaders flatten each dataset's best query text into the "text"
@@ -263,9 +243,9 @@ def main():
         print(f"Auto-selected query key: {args.query_key}")
 
     # Auto-adjust max_length for browsecomp_plus + qwen3_emb
-    if args.dataset == "browsecomp_plus" and args.retrieval_method.startswith("qwen3_emb"):
+    if args.dataset == "browsecomp_plus" and args.retriever.startswith("qwen3_emb"):
         args.max_length = 4096
-        print(f"Auto-adjusted max_length to {args.max_length} for browsecomp_plus + {args.retrieval_method}")
+        print(f"Auto-adjusted max_length to {args.max_length} for browsecomp_plus + {args.retriever}")
 
     if args.min_relevance_score is None:
         if args.dataset == "neuclir":
@@ -278,20 +258,10 @@ def main():
     # ── Resolve file_data_set ──
     file_data_set = resolve_split_id(args.dataset, args.dataset_year, args.subset)
 
-    # ── Auto-select corpus_path (following setup_public_dataset_paths) ──
+    # ── Auto-select corpus_path from dataset/subset (shared layout helper) ──
     if args.corpus_path is None:
-        _ir_root = DATA_ROOT
-        if args.dataset == "neuclir":
-            _corpus_file = f"{corpus_name(args.subset)}.jsonl"
-            args.corpus_path = str(_ir_root / "neuclir" / "corpus" / _corpus_file)
-        elif args.dataset == "trqa":
-            _corpus_file = f"{trqa_corpus_name(args.subset)}.jsonl"
-            args.corpus_path = str(_ir_root / "trqa" / "corpus" / _corpus_file)
-        elif args.dataset == "browsecomp_plus":
-            args.corpus_path = str(_ir_root / "browsecomp_plus" / "corpus" / "corpus.jsonl")
-        else:
-            print(f"Warning: corpus_path not auto-selected for dataset '{args.dataset}'. Please set --corpus_path.")
-            return 1
+        args.corpus_path = str(default_corpus_path(
+            args.dataset, args.subset, partial=args.trqa_partial))
         print(f"Auto-selected corpus path: {args.corpus_path}")
 
     if args.save_dir is None:
@@ -299,16 +269,35 @@ def main():
         print(f"Using temp save_dir: {args.save_dir}")
 
     # Resolve model path
-    args.model_path = MODEL2PATH.get(args.retrieval_method, '')
-    pooling_method = MODEL2POOLING.get(args.retrieval_method)
+    args.model_path = MODEL2PATH.get(args.retriever, '')
+    pooling_method = MODEL2POOLING.get(args.retriever)
 
     print("=" * 70)
     print("INDEX BUILDER TEST")
     print("=" * 70)
-    print(f"Dataset:       {args.dataset} / {file_data_set}")
-    print(f"Corpus path:   {args.corpus_path}")
-    print(f"Save dir:      {args.save_dir}")
-    print(f"Retriever:     {args.retrieval_method}")
+    print("--- Dataset / paths ---")
+    print(f"Dataset:              {args.dataset} / {file_data_set}")
+    print(f"  dataset_year:       {args.dataset_year}")
+    print(f"  subset:             {args.subset}")
+    print(f"Corpus path:          {args.corpus_path}")
+    print(f"Save dir:             {args.save_dir}")
+    print("--- Data selection ---")
+    print(f"query_key:            {args.query_key}")
+    print(f"query_limit:          {args.query_limit}")
+    print(f"min_relevance_score:  {args.min_relevance_score}")
+    print(f"sub_corpus_max_size:  {args.sub_corpus_max_size}")
+    print("--- Index build hyperparameters ---")
+    print(f"Retriever:            {args.retriever}")
+    print(f"  model_path:         {args.model_path}")
+    print(f"  pooling_method:     {pooling_method}")
+    print(f"  max_length:         {args.max_length}")
+    print(f"  batch_size:         {args.batch_size}")
+    print(f"  use_fp16:           {args.use_fp16}")
+    print(f"  faiss_type:         {args.faiss_type}")
+    print(f"  faiss_gpu:          {args.faiss_gpu}")
+    print(f"  device_id:          {args.device_id}")
+    print(f"  save_embedding:     {args.save_embedding}")
+    print("=" * 70)
 
     # ── 1. Load queries and qrels ──
     print("\n=== 1. Loading queries and qrels ===")
@@ -376,7 +365,7 @@ def main():
     # 3. Build index on small corpus (following index_builder.py main())
     print("\n=== 3. Building index ===")
     index_builder = Index_Builder(
-        retrieval_method=args.retrieval_method,
+        retriever=args.retriever,
         model_path=args.model_path,
         corpus_path=small_corpus_path,
         save_dir=args.save_dir,
@@ -400,12 +389,12 @@ def main():
     class RetrieverConfig:
         pass
     config = RetrieverConfig()
-    config.retriever_name = args.retrieval_method
+    config.retriever_name = args.retriever
     config.corpus_path = small_corpus_path
     config.index_dir = args.save_dir
     config.retrieval_topk = 1000  # retrieve enough for recall@k
     config.retrieval_batch_size = 32
-    if args.dataset == "browsecomp_plus" and args.retrieval_method.startswith("qwen3_emb"):
+    if args.dataset == "browsecomp_plus" and args.retriever.startswith("qwen3_emb"):
         config.retrieval_query_max_length = 8196
     else:
         config.retrieval_query_max_length = 512
@@ -416,14 +405,14 @@ def main():
     config.device = __import__('torch').device('cuda' if __import__('torch').cuda.is_available() else 'cpu')
     config.splade_max_length = args.max_length  # Match index build for SPLADE
 
-    if args.retrieval_method == 'bm25':
+    if args.retriever == 'bm25':
         retriever = BM25Retriever(config)
-    elif args.retrieval_method in ('spladepp', 'spladev3'):
+    elif args.retriever in ('spladepp', 'spladev3'):
         retriever = SPLADERetriever(config)
-    elif args.retrieval_method in ['contriever', 'dpr', 'e5', 'bge'] or args.retrieval_method.startswith('qwen3_emb'):
+    elif args.retriever in ['contriever', 'dpr', 'e5', 'bge'] or args.retriever.startswith('qwen3_emb'):
         retriever = DenseRetriever(config)
     else:
-        print(f"Error: Unsupported retriever for test: {args.retrieval_method}")
+        print(f"Error: Unsupported retriever for test: {args.retriever}")
         return 1
 
     k_values = [1, 3, 10, 100]
@@ -451,7 +440,7 @@ def main():
             'n': n,
             'dataset': args.dataset,
             'file_data_set': file_data_set,
-            'retrieval_method': args.retrieval_method,
+            'retriever': args.retriever,
             'entity_recall': recall_all,
             'entity_recall_by_k': recall_by_k,
         }, f, indent=2)
@@ -473,6 +462,10 @@ def main():
 if __name__ == "__main__":
     sys.exit(main())
 
-# python src/agentic_retrieval_research/indexing/index_builder_test.py
-# python src/agentic_retrieval_research/indexing/index_builder_test.py --dataset neuclir --dataset-year 2023 --subset news --retrieval_method bge --query_limit 20
-# python src/agentic_retrieval_research/indexing/index_builder_test.py --dataset browsecomp_plus --retrieval_method bge --query_limit 20
+# Only --retriever and --dataset are CLI; everything else lives in the
+# YAML config (configs/index_build_test.yaml). Any config key can still be
+# overridden ad-hoc, e.g. --subset technical --query-limit 20.
+#
+# python src/indexing_corpus_dataset/index_builder_test.py
+# python src/indexing_corpus_dataset/index_builder_test.py --dataset neuclir --retriever bge
+# python src/indexing_corpus_dataset/index_builder_test.py --dataset browsecomp_plus

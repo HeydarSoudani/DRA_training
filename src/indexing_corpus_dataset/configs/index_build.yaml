@@ -1,0 +1,40 @@
+# ============================================================================
+# Default config for src/indexing_corpus_dataset/index_builder.py
+# ============================================================================
+# The frequently-varied knobs stay on the CLI and are NOT listed here:
+#   --retriever  --dataset
+#
+# Everything else lives below.  Precedence (lowest -> highest):
+#   built-in BUILD_DEFAULTS  <  this file  <  explicit CLI override
+# Any value below can still be overridden for a single run, e.g.:
+#   python -m indexing_corpus_dataset.index_builder \
+#     --dataset neuclir --retriever bge --batch-size 32
+#
+# Use a different file with:  --config path/to/other.yaml
+#
+# Fields left as `null` are auto-derived at runtime:
+#   dataset_year / subset  -> auto-selected from --dataset
+#   corpus_path            -> DATA_ROOT/<dataset>/corpus/<stem>.jsonl (per subset)
+#   save_dir               -> DATA_ROOT/<dataset>/indices/
+#   index_path             -> derived from corpus stem + retrieval method
+# ============================================================================
+
+# ── Dataset selection (--retriever and --dataset are CLI) ─────────────
+dataset_year: null      # neuclir: 2023|2024; trqa: test|validation; null = auto
+subset: null            # neuclir: news|technical; trqa: wiki1|wiki2|ecommerce; null = auto
+trqa_partial: true      # trqa: use wiki_partial corpus (vs full wiki) when true
+
+# ── Path overrides (null = auto-derive from dataset/subset) ──────────────────
+corpus_path: null       # full corpus JSONL (or glob); auto-selected if null
+save_dir: null          # index output directory; auto-selected if null
+index_path: null        # explicit output index path; derived from corpus stem if null
+embedding_path: null    # pre-computed embeddings (.memmap); skips encoding if set
+
+# ── Index-build knobs ────────────────────────────────────────────────────────
+max_length: 512         # max token length per passage (auto-raised for bcomp+qwen3)
+batch_size: 16          # encoding batch size
+faiss_type: Flat        # FAISS index factory string (dense retrievers)
+save_embedding: true    # persist the encoded embeddings alongside the index
+use_fp16: true          # encode in half precision
+faiss_gpu: false        # build the FAISS index on GPU
+device_id: null         # GPU device id (e.g. 0, 1); null = auto. Ignored for MPS

@@ -119,4 +119,5 @@ ENV/
 data/
 archive/
 experiments/*/run_outputs/
+script_logging/
 
