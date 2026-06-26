@@ -118,6 +118,6 @@ ENV/
 # My
 data/
 archive/
-experiments/*/run_outputs/
+run_outputs/
 script_logging/
 

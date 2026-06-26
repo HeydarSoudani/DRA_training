@@ -5,7 +5,7 @@ args to determine which vLLM servers (if any) are required, allocates GPUs,
 launches them as background processes, waits for health, and tears them down
 on exit.
 
-Usage (inside run_dra_inference.py)::
+Usage (inside dra_inference.py)::
 
     manager = VLLMServerManager()
     gpu_ids = manager.auto_start(args, total_gpus=8)
@@ -230,7 +230,7 @@ class VLLMServerManager:
         """Resolve needed servers, allocate GPUs, launch, wait for health.
 
         Args:
-            args: Parsed CLI namespace from run_dra_inference.py.
+            args: Parsed CLI namespace from dra_inference.py.
             total_gpus: Total number of GPUs on the machine.
             health_timeout: Max seconds to wait for each server to become healthy.
 

@@ -810,7 +810,7 @@ if __name__ == "__main__":
 # ============================================================================
 # EXAMPLE USAGE
 # ============================================================================
-#   CUDA_VISIBLE_DEVICES=5,6 python experiments/run_dra_inference.py --dataset browsecomp_plus --limit 1
-#   CUDA_VISIBLE_DEVICES=0,1,2 python experiments/run_dra_inference.py --dataset neuclir --limit 1
-#   python experiments/run_dra_inference.py --dataset neuclir --num-gpus 6 --quiet --limit 6
-#   python experiments/run_dra_inference.py --dataset browsecomp_plus --eval-only --num-gpus 8 --quiet --limit 12
+#   CUDA_VISIBLE_DEVICES=5,6 python experiments/dra_inference.py --dataset browsecomp_plus --limit 1
+#   CUDA_VISIBLE_DEVICES=0,1,2 python experiments/dra_inference.py --dataset neuclir --limit 1
+#   python experiments/dra_inference.py --dataset neuclir --num-gpus 6 --quiet --limit 6
+#   python experiments/dra_inference.py --dataset browsecomp_plus --eval-only --num-gpus 8 --quiet --limit 12

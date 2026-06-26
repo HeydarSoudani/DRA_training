@@ -1,7 +1,7 @@
 """evaluation.runner — evaluation orchestration for the inference pipeline.
 
 Wires the evaluator classes together and runs them over a completed inference
-run.  Used by ``experiments/run_dra_inference.py``:
+run.  Used by ``experiments/dra_inference.py``:
 
     build_evaluators                Instantiate Retrieval/Generation/Trajectory/
                                     CitedDoc/SeenDoc/Accuracy evaluators.

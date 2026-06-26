@@ -3,7 +3,7 @@
 This is the wiring layer that assembles heavy component packages
 (``controller_component``, ``searcher_component``, ``deep_research_agents``,
 ``evaluation``) into a runnable agent. It is consumed by the ``run_pipeline``
-entry point in ``experiments/run_dra_inference.py``.
+entry point in ``experiments/dra_inference.py``.
 
 Leaf-level helpers (LLM-client factory, CLI arg resolution, output naming) live
 in ``utils`` so this module is the only place that depends on the heavy

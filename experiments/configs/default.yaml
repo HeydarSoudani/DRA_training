@@ -1,5 +1,5 @@
 # ============================================================================
-# Default run configuration for experiments/run_dra_inference.py
+# Default run configuration for experiments/dra_inference.py
 # ============================================================================
 # This file holds the mostly-fixed variables for the DRA inference pipeline.
 # Edit values here instead of passing long command lines.
@@ -11,7 +11,7 @@
 # Precedence (lowest -> highest):
 #   built-in fallback  <  this file  <  explicit CLI flag
 # So any value below can still be overridden for a single run, e.g.:
-#   python experiments/run_dra_inference.py --dataset neuclir --top-k 50
+#   python experiments/dra_inference.py --dataset neuclir --top-k 50
 #
 # Use a different file with:  --config path/to/other.yaml
 #
