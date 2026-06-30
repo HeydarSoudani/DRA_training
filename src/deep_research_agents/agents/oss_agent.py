@@ -32,7 +32,7 @@ class OSS_Agent(BasicAgent):
 
     AGENT_NAME = "OSS"
 
-    def __init__(self, llm_client=None, retriever=None, max_iteration: int = 100, seen_top_k: int = 5, model_url: Optional[str] = None, model_name: str = "openai/gpt-oss-20b", max_output_tokens: int = 20000, reasoning_effort: str = "high", verbose: bool = True) -> None:
+    def __init__(self, llm_client=None, retriever=None, max_iteration: int = 100, seen_top_k: int = 5, model_url: Optional[str] = None, model_name: str = "openai/gpt-oss-20b", max_output_tokens: int = 20000, reasoning_effort: str = "high", verbose: bool = True, api_key: Optional[str] = None) -> None:
         super().__init__(llm_client, retriever, max_iteration, seen_top_k)
 
         self.model_url = model_url or os.getenv(
@@ -42,7 +42,9 @@ class OSS_Agent(BasicAgent):
         self.max_output_tokens = max_output_tokens
         self.reasoning_effort = reasoning_effort
         self.verbose = verbose
-        self._api_key = os.getenv("OSS_API_KEY", "EMPTY")
+        # Explicit api_key (e.g. OpenRouter) wins; otherwise fall back to the
+        # OSS_API_KEY env (local vLLM uses the placeholder "EMPTY").
+        self._api_key = api_key or os.getenv("OSS_API_KEY", "EMPTY")
 
         from utils.token_meter import TokenMeter
         self.token_meter = TokenMeter()

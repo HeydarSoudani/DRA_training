@@ -21,10 +21,12 @@ from pathlib import Path
 from typing import Optional
 
 from utils.config import (
+    OPENROUTER_BASE_URL,
     SELF_MANAGED_LLM_AGENTS,
     _RetrieverConfig,
     get_reranker_configs,
     is_local_finetuned,
+    resolve_agent_backend,
 )
 from reasoner_component import create_generator
 from utils.text_utils import _build_cited_docs_ranked_list, build_references_section
@@ -190,6 +192,7 @@ def build_agent(
     llm_client=None,
     retriever=None,
     *,
+    agentic_model_cli: Optional[str] = None,
     max_iteration: int = 100,
     seen_top_k: int = 5,
     verbose: bool = False,
@@ -215,14 +218,47 @@ def build_agent(
     from deep_research_agents.agents import AGENT_MAP
 
     model_class = AGENT_MAP[agentic_model]
+    # Backend (API vs vLLM) is resolved on the user-facing CLI name because the
+    # OpenRouter registry distinguishes oss_20b / oss_120b, which both collapse
+    # to the internal agent name "oss".
+    _cli_name = agentic_model_cli or agentic_model
     _reasoning_extra: dict = {}
     if use_plan and agentic_model == "react":
         _reasoning_extra["use_plan"] = True
     if agentic_model == "glm":
         _reasoning_extra["max_output_tokens"] = min(max_output_tokens_total, 20000)
+        # Prefer OpenRouter when the agent is in the registry (0 local GPU);
+        # otherwise fall through to the agent's vLLM defaults (localhost:6008).
+        _backend, _slug = resolve_agent_backend(_cli_name)
+        if _backend == "api":
+            _reasoning_extra["model_url"] = OPENROUTER_BASE_URL
+            _reasoning_extra["model_name"] = _slug
+            _reasoning_extra["api_key"] = os.getenv("OPENROUTER_API_KEY")
     elif agentic_model == "oss":
         _reasoning_extra["max_output_tokens"] = max_output_tokens_total
-        _reasoning_extra["model_name"] = f"openai/{llm_model}"
+        # Prefer OpenRouter (Responses API) when oss_20b / oss_120b is in the
+        # registry; otherwise use the agent's local vLLM defaults (localhost:6008).
+        _backend, _slug = resolve_agent_backend(_cli_name)
+        if _backend == "api":
+            _reasoning_extra["model_url"] = OPENROUTER_BASE_URL
+            _reasoning_extra["model_name"] = _slug
+            _reasoning_extra["api_key"] = os.getenv("OPENROUTER_API_KEY")
+        else:
+            _reasoning_extra["model_name"] = f"openai/{llm_model}"
+    elif agentic_model == "qwen3":
+        # Two CLI sizes (qwen3_4b_thinking / qwen3_30b_thinking) collapse to the
+        # "qwen3" agent; the concrete model is carried by llm_model.  The Chat
+        # Completions call must name the model exactly as vLLM serves it (the
+        # full HF id), so forward llm_model as model_name.
+        _reasoning_extra["max_output_tokens"] = min(max_output_tokens_total, 20000)
+        _reasoning_extra["model_name"] = llm_model
+        # Prefer OpenRouter when the agent is in the registry (0 local GPU);
+        # otherwise fall through to the agent's vLLM defaults (localhost:6008).
+        _backend, _slug = resolve_agent_backend(_cli_name)
+        if _backend == "api":
+            _reasoning_extra["model_url"] = OPENROUTER_BASE_URL
+            _reasoning_extra["model_name"] = _slug
+            _reasoning_extra["api_key"] = os.getenv("OPENROUTER_API_KEY")
     elif agentic_model == "tongyi":
         _reasoning_extra["max_tokens_per_step"] = min(max_output_tokens_total, 20000)
     elif agentic_model == "cpm_explore":
@@ -409,6 +445,7 @@ def _init_worker(worker_id: int, worker_config: dict):
     llm_model = worker_config["llm_model"]
     agent = build_agent(
         agentic_model=agentic_model,
+        agentic_model_cli=worker_config.get("agentic_model_cli", agentic_model),
         llm_model=llm_model,
         llm_client=llm_client,
         retriever=retriever,

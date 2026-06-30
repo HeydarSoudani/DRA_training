@@ -770,7 +770,11 @@ class Index_Builder:
         dim = all_embeddings.shape[-1]
         faiss_index = faiss.index_factory(dim, self.faiss_type, faiss.METRIC_INNER_PRODUCT)
 
-        if self.faiss_gpu:
+        # GPU faiss is only available with the faiss-gpu package. The project
+        # runs faiss-cpu (GPU faiss is built for CUDA 12, incompatible with the
+        # CUDA-13 torch vLLM requires), so guard the GPU path and fall back to a
+        # CPU build — same pattern as DenseRetriever in searcher_component.
+        if self.faiss_gpu and hasattr(faiss, 'GpuMultipleClonerOptions'):
             co = faiss.GpuMultipleClonerOptions()
             co.useFloat16 = True
             co.shard = True
@@ -780,6 +784,9 @@ class Index_Builder:
             faiss_index.add(all_embeddings)
             faiss_index = faiss.index_gpu_to_cpu(faiss_index)
         else:
+            if self.faiss_gpu:
+                print("WARNING: faiss_gpu=True but faiss-cpu is installed — "
+                      "building the index on CPU instead.")
             if not faiss_index.is_trained:
                 faiss_index.train(all_embeddings)
             faiss_index.add(all_embeddings)

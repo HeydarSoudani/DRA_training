@@ -3,7 +3,7 @@
 The frequently-varied knobs (``--retriever`` and ``--dataset``) stay on
 the CLI; everything else lives in a YAML config file and is merged onto the
 parsed args.  This mirrors the inference pipeline's config pattern
-(:mod:`utils.cli_setup` + ``experiments/configs/default.yaml``) but is scoped to
+(:mod:`utils.cli_setup` + ``experiments/configs/dra_inference.yaml``) but is scoped to
 the index-building entry points so it stays import-light.
 
 Two entry points share this module:

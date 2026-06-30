@@ -35,27 +35,23 @@ import urllib.error
 
 logger = logging.getLogger(__name__)
 
-# ── Paths ────────────────────────────────────────────────────────────────────
-_HF_HOME = "/mnt/sagemaker-nvme/huggingface"
-_DOWNLOAD_DIR = "/mnt/sagemaker-nvme/huggingface/hub"
-_LOG_DIR = Path("/tmp/vllm_server_logs")
+# ── Paths (env-driven; Snellius defaults) ─────────────────────────────────────
+# All paths honour the environment first so SLURM jobs (which don't source
+# ~/.bashrc) can set them once and have both the manager and the standalone
+# serve_*.sh scripts agree.  Defaults target the project's Snellius layout.
+_HF_HOME = os.environ.get(
+    "HF_HOME", "/projects/0/prjs0834/heydars/.cache/huggingface"
+)
+_DOWNLOAD_DIR = os.environ.get("HF_HUB_CACHE", os.path.join(_HF_HOME, "hub"))
+_LOG_DIR = Path(os.environ.get("DRA_VLLM_LOG_DIR", "/tmp/vllm_server_logs"))
 
-# ── S3 model cache ──────────────────────────────────────────────────────────
-# SageMaker VPCs may block HuggingFace downloads.  Models listed here are
-# fetched from S3 instead.  Upload once from a machine with HF access:
-#
-#   aws s3 sync ~/.cache/huggingface/hub/models--Qwen--Qwen3-32B/snapshots/<hash>/ \
-#       s3://a204383-ml-workspace-practicallawqw7t-use1/agentic_retrieval/models/Qwen--Qwen3-32B/ \
-#       --exclude "*.bin"
-#
-_S3_BUCKET = "a204383-ml-workspace-practicallawqw7t-use1"
-_S3_MODELS_PREFIX = "agentic_retrieval/models"
-_LOCAL_MODELS_DIR = Path("/mnt/sagemaker-nvme/models")
-
-_S3_MODEL_CACHE: Dict[str, str] = {
-    "Qwen/Qwen3-32B": f"s3://{_S3_BUCKET}/{_S3_MODELS_PREFIX}/Qwen--Qwen3-32B",
-    "zai-org/GLM-4.7-Flash": f"s3://{_S3_BUCKET}/{_S3_MODELS_PREFIX}/zai-org--GLM-4.7-Flash",
-}
+# ── Local model cache ─────────────────────────────────────────────────────────
+# Pre-staged weights (e.g. for offline nodes) live under this directory as
+# ``<DRA_MODELS_DIR>/<org>--<model>/``.  When a model is found there it is
+# served from disk; otherwise vLLM downloads it into the HF cache (_DOWNLOAD_DIR).
+_LOCAL_MODELS_DIR = Path(
+    os.environ.get("DRA_MODELS_DIR", "/projects/0/prjs0834/heydars/DRA_training/models")
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -67,7 +63,9 @@ class ServerSpec:
     """Specification for a single vLLM server instance."""
     model: str
     port: int
-    tp_size: int
+    tp_size: int                               # default / fallback TP (used when
+                                               # model_gb is None or GPU mem is
+                                               # undetectable)
     max_model_len: Optional[int] = 65536
     max_num_seqs: Optional[int] = 64
     gpu_memory_utilization: float = 0.90
@@ -75,6 +73,12 @@ class ServerSpec:
     extra_args: List[str] = field(default_factory=list)
     dtype: Optional[str] = None                # e.g. "float16" for rank1
     enable_prefix_caching: bool = False
+    # Auto-TP sizing (see VLLMServerManager._fit_tp).  model_gb = approximate
+    # on-GPU weight footprint; allowed_tp = TP values valid for this model
+    # (must divide its (kv-)head count).  When model_gb is None, tp_size is used
+    # as-is (no auto-sizing).
+    model_gb: Optional[float] = None
+    allowed_tp: Tuple[int, ...] = (1, 2, 4)
     # LoRA support (rank_r1)
     enable_lora: bool = False
     lora_modules: Optional[str] = None         # "alias=path"
@@ -95,49 +99,89 @@ _LLM_SERVER_SPECS: Dict[str, ServerSpec] = {
         port=6008, tp_size=1,
         max_model_len=131072, max_num_seqs=16,
         enforce_eager=True,
+        model_gb=13.0, allowed_tp=(1,),        # mxfp4-quantized; single GPU
         label="GPT-OSS-20B",
     ),
     "oss:gpt-oss-120b": ServerSpec(
         model="openai/gpt-oss-120b",
-        port=6008, tp_size=8,
+        port=6008, tp_size=2,
         max_model_len=131072, max_num_seqs=16,
         enforce_eager=True,
+        model_gb=63.0, allowed_tp=(1, 2, 4),   # mxfp4-quantized MoE
         label="GPT-OSS-120B",
     ),
     "glm": ServerSpec(
         model="zai-org/GLM-4.7-Flash",
-        port=6008, tp_size=4,
+        port=6008, tp_size=2,
         max_model_len=65536, max_num_seqs=16,
         gpu_memory_utilization=0.90,
         enforce_eager=False,
         enable_prefix_caching=True,
+        model_gb=60.0, allowed_tp=(1, 2, 4),   # 30B fp16; 20 heads → TP|20
         extra_args=["--enable-auto-tool-choice", "--tool-call-parser", "glm47"],
         label="GLM-4.7-Flash",
     ),
     "tongyi": ServerSpec(
         model="Alibaba-NLP/Tongyi-DeepResearch-30B-A3B",
-        port=6008, tp_size=4,
+        port=6008, tp_size=2,
         max_model_len=131072, max_num_seqs=16,
         gpu_memory_utilization=0.90,
         enforce_eager=False,
         enable_prefix_caching=True,
+        model_gb=61.0, allowed_tp=(1, 2, 4),   # 30B MoE; kv_heads=4 → TP|4
         extra_args=["--enable-auto-tool-choice", "--tool-call-parser", "hermes"],
         label="Tongyi-DeepResearch-30B",
     ),
+    "qwen3:Qwen/Qwen3-4B-Thinking-2507": ServerSpec(
+        model="Qwen/Qwen3-4B-Thinking-2507",
+        port=6008, tp_size=1,
+        max_model_len=131072, max_num_seqs=16,
+        gpu_memory_utilization=0.90,
+        enforce_eager=False,
+        enable_prefix_caching=True,
+        model_gb=9.0, allowed_tp=(1, 2, 4),    # 4B fp16
+        # Thinking models emit a reasoning block closed by </think>; the
+        # deepseek_r1 reasoning parser routes it to message.reasoning_content
+        # (vLLM 0.8.3 has no dedicated qwen3 parser, and deepseek_r1 handles the
+        # missing opening <think> tag that the 2507 models omit).
+        # NOTE: --enable-reasoning was removed in vLLM >=0.9; passing
+        # --reasoning-parser now enables reasoning implicitly.
+        extra_args=["--reasoning-parser", "deepseek_r1",
+                    "--enable-auto-tool-choice", "--tool-call-parser", "hermes"],
+        label="Qwen3-4B-Thinking-2507",
+    ),
+    "qwen3:Qwen/Qwen3-30B-A3B-Thinking-2507": ServerSpec(
+        model="Qwen/Qwen3-30B-A3B-Thinking-2507",
+        port=6008, tp_size=2,
+        max_model_len=131072, max_num_seqs=16,
+        gpu_memory_utilization=0.90,
+        enforce_eager=False,
+        enable_prefix_caching=True,
+        model_gb=61.0, allowed_tp=(1, 2, 4),   # 30B MoE (A3B); kv_heads=4 → TP|4
+        # See 4B spec above: deepseek_r1 reasoning parser separates the </think>
+        # block into reasoning_content; hermes parses the tool calls.
+        # NOTE: --enable-reasoning was removed in vLLM >=0.9; passing
+        # --reasoning-parser now enables reasoning implicitly.
+        extra_args=["--reasoning-parser", "deepseek_r1",
+                    "--enable-auto-tool-choice", "--tool-call-parser", "hermes"],
+        label="Qwen3-30B-A3B-Thinking-2507",
+    ),
     "webweaver": ServerSpec(
         model="Alibaba-NLP/Tongyi-DeepResearch-30B-A3B",
-        port=6008, tp_size=4,
+        port=6008, tp_size=2,
         max_model_len=131072, max_num_seqs=16,
         gpu_memory_utilization=0.90,
         enforce_eager=True,
+        model_gb=61.0, allowed_tp=(1, 2, 4),
         extra_args=["--enable-auto-tool-choice", "--tool-call-parser", "hermes"],
         label="WebWeaver (Tongyi-30B)",
     ),
     "finetuned:cpm_report": ServerSpec(
         model="openbmb/AgentCPM-Report",
-        port=6008, tp_size=2,
+        port=6008, tp_size=1,
         max_model_len=65536, max_num_seqs=64,
         gpu_memory_utilization=0.9,
+        model_gb=16.0, allowed_tp=(1, 2),      # ~8B
         label="AgentCPM-Report",
     ),
     "finetuned:cpm_explore": ServerSpec(
@@ -152,23 +196,26 @@ _LLM_SERVER_SPECS: Dict[str, ServerSpec] = {
         port=6008, tp_size=1,
         max_model_len=65536, max_num_seqs=64,
         gpu_memory_utilization=0.9,
+        model_gb=16.0, allowed_tp=(1, 2),      # 8B
         label="DR-Tulu-8B",
     ),
     "finetuned:webweaver": ServerSpec(
         model="Alibaba-NLP/Tongyi-DeepResearch-30B-A3B",
-        port=6008, tp_size=4,
+        port=6008, tp_size=2,
         max_model_len=131072, max_num_seqs=16,
         gpu_memory_utilization=0.90,
         enforce_eager=True,
+        model_gb=61.0, allowed_tp=(1, 2, 4),
         extra_args=["--enable-auto-tool-choice", "--tool-call-parser", "hermes"],
         label="WebWeaver finetuned (Tongyi-30B)",
     ),
     "finetuned:tongyi": ServerSpec(
         model="Alibaba-NLP/Tongyi-DeepResearch-30B-A3B",
-        port=6008, tp_size=4,
+        port=6008, tp_size=2,
         max_model_len=131072, max_num_seqs=16,
         gpu_memory_utilization=0.90,
         enforce_eager=True,
+        model_gb=61.0, allowed_tp=(1, 2, 4),
         extra_args=["--enable-auto-tool-choice", "--tool-call-parser", "hermes"],
         label="Tongyi finetuned",
     ),
@@ -182,6 +229,7 @@ _RERANKER_SERVER_SPECS: Dict[str, ServerSpec] = {
         max_model_len=4096, max_num_seqs=64,
         gpu_memory_utilization=0.9,
         dtype="float16",
+        model_gb=15.0, allowed_tp=(1, 2),      # 7B
         label="Rank1-7B reranker",
     ),
     "qwen3_reranker": ServerSpec(
@@ -189,6 +237,7 @@ _RERANKER_SERVER_SPECS: Dict[str, ServerSpec] = {
         port=8000, tp_size=1,
         max_model_len=8192, max_num_seqs=64,
         enable_prefix_caching=True,
+        model_gb=9.0, allowed_tp=(1,),         # 4B
         label="Qwen3-Reranker-4B",
     ),
 }
@@ -201,11 +250,12 @@ JUDGE_SERVER_SPEC = ServerSpec(
     port=6009, tp_size=1,
     max_model_len=16384, max_num_seqs=64,
     gpu_memory_utilization=0.90,
+    model_gb=64.0, allowed_tp=(1, 2, 4),       # 32B fp16; 8 kv-heads → TP|8
     label="Qwen3-32B (judge)",
 )
 
 # Agents whose LLM connection is self-managed (they create their own OpenAI client)
-_SELF_MANAGED_AGENTS = frozenset({"oss", "tongyi", "glm", "cpm_explore"})
+_SELF_MANAGED_AGENTS = frozenset({"oss", "tongyi", "glm", "qwen3", "cpm_explore", "cpm_report"})
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -243,17 +293,28 @@ class VLLMServerManager:
             print("[vLLM Manager] No vLLM servers needed for this configuration.")
             return None
 
-        # Check GPU budget
+        # Auto-size each server's TP from detected per-GPU memory.  Reserve at
+        # least one GPU for pipeline workers when more than one server-GPU is
+        # available; the budget check below handles the (rare) case where the
+        # models still cannot leave a worker free.
+        per_gpu_gb = self._detect_per_gpu_gb()
+        max_tp = max(1, total_gpus - 1)
+        for spec in specs:
+            spec.tp_size = self._fit_tp(spec, per_gpu_gb, max_tp=max_tp)
+
+        # Check GPU budget.  vLLM may legitimately consume every GPU (e.g. a 30B
+        # model on 4×A100-40GB); in that case the retriever falls back to CPU
+        # (warned below).  Only a strictly impossible request is fatal.
         vllm_gpus_needed = sum(s.tp_size for s in specs)
-        if vllm_gpus_needed >= total_gpus:
+        if vllm_gpus_needed > total_gpus:
             print(f"\n[vLLM Manager] ERROR: Need {vllm_gpus_needed} GPUs for vLLM "
                   f"servers but only {total_gpus} available.")
             print(f"  Servers requested:")
             for s in specs:
                 print(f"    - {s.label}: TP={s.tp_size} on port {s.port}")
             print(f"\n  Options:")
-            print(f"    - Use a larger instance (e.g. ml.g6e.48xlarge for 8 GPUs)")
-            print(f"    - Use a cloud LLM (e.g. --llm-model claude-sonnet-4-5) to free GPU budget")
+            print(f"    - Use an H100 node (94 GB) — 30B models fit at TP=1")
+            print(f"    - Route the agent via OpenRouter (set OPENROUTER_API_KEY)")
             print(f"    - Remove the vLLM reranker (--post-retrieval-reranker null)")
             sys.exit(1)
 
@@ -470,18 +531,13 @@ class VLLMServerManager:
 
     # ── TP size selection ─────────────────────────────────────────────────
 
-    @staticmethod
-    def _compute_judge_tp_size(
-        total_gpus: int,
-        gpu_memory_utilization: float,
-        model_gb: float = 70.0,
-    ) -> int:
-        """Choose the smallest TP size that fits the judge model.
+    # Headroom multiplier on top of raw weights to leave room for the KV cache,
+    # activations, and CUDA-graph/context overhead.
+    _TP_MEM_SAFETY = 1.2
 
-        Queries nvidia-smi for per-GPU memory.  Falls back to TP=total_gpus
-        if the query fails.
-        """
-        import math
+    @staticmethod
+    def _detect_per_gpu_gb() -> Optional[float]:
+        """Return per-GPU total memory in GB (GPU 0), or None if undetectable."""
         try:
             result = subprocess.run(
                 ["nvidia-smi", "--query-gpu=memory.total",
@@ -489,18 +545,71 @@ class VLLMServerManager:
                 capture_output=True, text=True, timeout=10,
             )
             per_gpu_mb = int(result.stdout.strip().split("\n")[0].strip())
-            per_gpu_gb = per_gpu_mb / 1024
-            usable_per_gpu = per_gpu_gb * gpu_memory_utilization
-            tp = max(1, math.ceil(model_gb / usable_per_gpu))
-            tp = min(tp, total_gpus)
-            print(f"[vLLM Manager] Per-GPU memory: {per_gpu_gb:.1f} GB "
-                  f"(usable {usable_per_gpu:.1f} GB) → judge TP={tp}")
-            return tp
+            return per_gpu_mb / 1024
         except Exception:
+            return None
+
+    @classmethod
+    def _fit_tp(
+        cls,
+        spec: "ServerSpec",
+        per_gpu_gb: Optional[float],
+        *,
+        max_tp: int,
+    ) -> int:
+        """Pick the smallest allowed TP that fits ``spec`` on the detected GPUs.
+
+        Chooses the smallest value in ``spec.allowed_tp`` such that
+        ``tp · per_gpu_gb · gpu_memory_utilization >= model_gb · safety`` while
+        not exceeding ``max_tp``.  When the model has no ``model_gb`` estimate or
+        GPU memory cannot be detected, the spec's static ``tp_size`` is used
+        (clamped to allowed_tp / max_tp).
+        """
+        allowed = sorted(t for t in spec.allowed_tp if t >= 1)
+        capped = [t for t in allowed if t <= max_tp]
+
+        # No estimate / no detection → fall back to the static default.
+        if spec.model_gb is None or per_gpu_gb is None:
+            tp = spec.tp_size
+            if capped:
+                tp = min(capped, key=lambda t: abs(t - spec.tp_size))
+            reason = "static default" if spec.model_gb is None else "GPU mem undetectable"
+            print(f"[vLLM Manager] {spec.label}: TP={tp} ({reason})")
+            return tp
+
+        usable = per_gpu_gb * spec.gpu_memory_utilization
+        need_gb = spec.model_gb * cls._TP_MEM_SAFETY
+
+        fit = next((t for t in capped if t * usable >= need_gb), None)
+        if fit is None:
+            # Cannot fit within max_tp; take the largest we are allowed, else the
+            # smallest allowed value (auto_start's budget check guards the rest).
+            fit = capped[-1] if capped else allowed[0]
+            print(f"[vLLM Manager] {spec.label}: needs ~{need_gb:.0f} GB but "
+                  f"per-GPU usable is {usable:.0f} GB — TP={fit} (may share/CPU)")
+        else:
+            print(f"[vLLM Manager] {spec.label}: ~{spec.model_gb:.0f} GB weights, "
+                  f"per-GPU {per_gpu_gb:.0f} GB (usable {usable:.0f}) → TP={fit}")
+        return fit
+
+    def _compute_judge_tp_size(
+        self,
+        total_gpus: int,
+        gpu_memory_utilization: float,
+        model_gb: float = None,
+    ) -> int:
+        """Choose the smallest TP size that fits the judge model.
+
+        The judge runs after the query-processing servers are gone, so it may
+        use every GPU (``max_tp = total_gpus``).
+        """
+        per_gpu_gb = self._detect_per_gpu_gb()
+        if per_gpu_gb is None:
             tp = min(4, total_gpus)
             print(f"[vLLM Manager] Could not query GPU memory — "
                   f"defaulting judge TP={tp}")
             return tp
+        return self._fit_tp(JUDGE_SERVER_SPEC, per_gpu_gb, max_tp=total_gpus)
 
     # ── Resolve which servers are needed ────────────────────────────────────
 
@@ -534,7 +643,18 @@ class VLLMServerManager:
     def _resolve_llm_server(self, args) -> Optional[ServerSpec]:
         """Resolve the LLM server spec from agentic_model + llm_model."""
         agentic_model = getattr(args, "agentic_model", "")
+        agentic_model_cli = getattr(args, "agentic_model_cli", agentic_model)
         llm_model = getattr(args, "llm_model", "")
+
+        # OpenRouter-routed agents are served via the hosted API — no local
+        # vLLM server and therefore no GPU reservation.  Backend resolution keys
+        # off the user-facing CLI name (oss_20b / oss_120b are distinct slugs
+        # that both collapse to the internal agent name "oss").
+        from utils.config import resolve_agent_backend
+        if resolve_agent_backend(agentic_model_cli)[0] == "api":
+            print(f"[vLLM Manager] '{agentic_model_cli}' routed to OpenRouter — "
+                  f"no vLLM server needed.")
+            return None
 
         # Self-managed agents always need their own vLLM server
         if agentic_model in _SELF_MANAGED_AGENTS:
@@ -545,6 +665,13 @@ class VLLMServerManager:
                     return _LLM_SERVER_SPECS[key]
                 # Default to oss:gpt-oss-20b if llm_model not recognized
                 return _LLM_SERVER_SPECS.get("oss:gpt-oss-20b")
+            # Qwen3-Thinking: model variant is determined by --llm-model
+            if agentic_model == "qwen3":
+                key = f"qwen3:{llm_model}"
+                if key in _LLM_SERVER_SPECS:
+                    return _LLM_SERVER_SPECS[key]
+                # Default to the 30B variant if llm_model not recognized
+                return _LLM_SERVER_SPECS.get("qwen3:Qwen/Qwen3-30B-A3B-Thinking-2507")
             # tongyi, glm
             if agentic_model in _LLM_SERVER_SPECS:
                 return _LLM_SERVER_SPECS[agentic_model]
@@ -566,49 +693,22 @@ class VLLMServerManager:
         # Cloud models (claude-*, gpt-*, qwen3-max) → no vLLM needed
         return None
 
-    # ── S3 model cache ─────────────────────────────────────────────────────
+    # ── Local model cache ──────────────────────────────────────────────────
 
     @staticmethod
     def _ensure_model_local(model_name: str) -> str:
-        """Return a local path to model weights, downloading from S3 if needed.
+        """Return a local weights path if pre-staged, else the HF model name.
 
-        If the model is not in ``_S3_MODEL_CACHE``, returns ``model_name``
-        unchanged (vLLM will download from HuggingFace as usual).
+        Looks for ``<DRA_MODELS_DIR>/<org>--<model>/`` containing ``.safetensors``
+        (pre-downloaded weights for offline nodes).  When absent, returns
+        ``model_name`` unchanged so vLLM downloads it into the HF cache
+        (``HF_HOME`` / ``--download-dir``).
         """
-        if model_name not in _S3_MODEL_CACHE:
-            return model_name
-
         local_dir = _LOCAL_MODELS_DIR / model_name.replace("/", "--")
-
-        # Already downloaded to our local cache
         if local_dir.exists() and any(local_dir.glob("*.safetensors")):
-            print(f"[vLLM Manager] Model cached at {local_dir}")
+            print(f"[vLLM Manager] Using pre-staged weights at {local_dir}")
             return str(local_dir)
-
-        # Check HF cache (works locally where the model was downloaded before)
-        hf_cache = Path(_DOWNLOAD_DIR) / f"models--{model_name.replace('/', '--')}"
-        if hf_cache.exists() and any(hf_cache.glob("snapshots/*/*.safetensors")):
-            print(f"[vLLM Manager] Model found in HF cache: {hf_cache}")
-            return model_name
-
-        # Download from S3
-        s3_uri = _S3_MODEL_CACHE[model_name]
-        local_dir.mkdir(parents=True, exist_ok=True)
-        print(f"[vLLM Manager] Downloading {model_name} from S3...")
-        print(f"  S3 source : {s3_uri}")
-        print(f"  Local dest: {local_dir}")
-
-        result = subprocess.run(
-            ["aws", "s3", "sync", s3_uri, str(local_dir), "--quiet"],
-            capture_output=True, text=True, timeout=3600,
-        )
-        if result.returncode != 0:
-            print(f"[vLLM Manager] WARNING: S3 download failed: {result.stderr}")
-            print(f"  Falling back to HuggingFace download...")
-            return model_name
-
-        print(f"[vLLM Manager] Model downloaded successfully ({local_dir})")
-        return str(local_dir)
+        return model_name
 
     # ── Launch a server process ─────────────────────────────────────────────
 

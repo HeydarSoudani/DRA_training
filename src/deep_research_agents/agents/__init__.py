@@ -13,6 +13,7 @@ from .webweaver_agent import WebWeaver_Agent
 from .drtulu_agent import DrTulu_Agent
 from .glm_agent import GLM_Agent
 from .oss_agent import OSS_Agent
+from .qwen3_agent import Qwen3_Agent
 from .tongyi_agent import TongyiDR_Agent
 # Registry constants
 REASONING_AGENTS = frozenset({
@@ -26,6 +27,7 @@ REASONING_AGENTS = frozenset({
     "drtulu",
     "glm",
     "oss",
+    "qwen3",
     "tongyi",
     "cpm_explore",
     "cpm_report",
@@ -45,6 +47,7 @@ AGENT_MAP = {
     "drtulu": DrTulu_Agent,
     "glm": GLM_Agent,
     "oss": OSS_Agent,
+    "qwen3": Qwen3_Agent,
     "tongyi": TongyiDR_Agent,
     "cpm_explore": CPMExplore,
     "cpm_report": CPMReport,
@@ -64,6 +67,7 @@ __all__ = [
     "DrTulu_Agent",
     "GLM_Agent",
     "OSS_Agent",
+    "Qwen3_Agent",
     "TongyiDR_Agent",
     "REASONING_AGENTS",
     "CPMExplore",

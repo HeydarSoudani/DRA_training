@@ -1,51 +1,66 @@
 # Python dependencies for DRA_training
-# Versions pinned to the working environment (Python 3.12).
+# Target: Python 3.13.5 (module "Python/3.13.5-GCCcore-14.3.0" on the Snellius
+# 2025 stack), installed into a venv via scripts/build_venv.sh. NOT conda.
+#
+# Versioning policy: highest versions compatible with Python 3.13 AND mutually
+# consistent (verified with `pip check`). The stack is ANCHORED on vLLM 0.24,
+# which dictates the torch trio (ABI-matched) and floors transformers/numpy.
+# These are the exact resolved versions — re-pin from `pip freeze` after any
+# intentional bump.
 
-# --- Core ML / inference ---
-torch==2.6.0
-transformers==4.56.1
-sentence-transformers==3.4.1
-safetensors==0.5.2
-vllm==0.8.3
-numpy==1.26.4
-scipy==1.15.1
-scikit-learn==1.6.1
-pandas==2.2.3
+# --- Core ML / inference (ANCHOR: vLLM drives the torch trio) ---
+# vllm 0.24.0 requires the CUDA-13 torch build (torch 2.11.0+cu130) and
+# transformers>=5.5.3. Keep the torch trio pinned exactly — drift => vLLM
+# "undefined symbol" at import.
+torch==2.11.0
+torchaudio==2.11.0
+torchvision==0.26.0
+vllm==0.24.0
+transformers==5.12.1           # >=5.5.3 (vllm) and <6 (pyserini)
+sentence-transformers==5.6.0
+safetensors==0.8.0
+numpy==2.4.6                   # <2.5: numba (transitive) requires numpy<2.5
+scipy==1.18.0
+scikit-learn==1.9.0
+pandas==3.0.3
 
 # --- Data / Parquet ---
-# NOTE: pyarrow 19.0.0 has a Parquet reader bug ("Repetition level histogram
-# size mismatch") that breaks loading some HF datasets (e.g. browsecomp-plus).
-# Fixed in 19.0.1+. Pin above the broken release.
-pyarrow>=19.0.1
-datasets==4.0.0
-huggingface_hub==0.34.4
+# pyarrow <19.0.1 had a Parquet reader bug ("Repetition level histogram size
+# mismatch") on some HF datasets (e.g. browsecomp-plus). Well above that.
+pyarrow==24.0.0
+datasets==5.0.0
+huggingface_hub==1.21.0
 
 # --- Retrieval / IR ---
-faiss-gpu-cu12==1.10.0          # provides the `faiss` module (use faiss-cpu==1.10.0 on CPU-only hosts)
-pyserini==0.44.0
-pyjnius==1.6.1                  # provides `jnius_config`, required by pyserini
-ir_datasets==0.5.11
-pytrec_eval==0.5
+# faiss-cpu (NOT faiss-gpu-cu12): GPU faiss is built for CUDA 12 and is
+# incompatible with the CUDA-13 torch that vLLM 0.24 requires (cublas symbol
+# clash). pyserini also depends on faiss-cpu. Indexing therefore runs faiss on
+# CPU — see scripts/run_index_builder.sh. If GPU faiss becomes a hard
+# requirement, it forces a CUDA-12 stack (older torch + older vLLM).
+faiss-cpu==1.14.3
+pyserini==2.3.0                # pure-python; needs a JVM (Java module in scripts/_activate.sh)
+pyjnius==1.7.0                 # `jnius_config`, required by pyserini
+ir_datasets==0.6.1
 rouge_score==0.1.2
+pytrec_eval==0.5               # builds from C/Cython sdist; compiles cleanly on 3.13
 
 # --- Rerankers (searcher_component/rerankers) ---
-rank_llm
-tevatron
+rank_llm==0.25.7
+tevatron==0.1.0
 
 # --- LLM APIs ---
-openai==1.61.1
-litellm==1.61.0
+openai==2.44.0
+litellm==1.90.1
 
 # --- Utilities ---
-pydantic==2.10.6
-Jinja2==3.1.5
-PyYAML==6.0.2
-json5==0.9.6
-requests==2.32.3
-tqdm==4.67.1
-packaging==23.2
+pydantic==2.13.4
+Jinja2==3.1.6
+PyYAML==6.0.3
+json5==0.15.0
+requests==2.34.2
+tqdm==4.68.3
+packaging==26.2
 
 # --- Optional ---
-# orjson is used as a faster JSON loader with a stdlib `json` fallback
-# (see utils/io_utils.py); install for a speed-up.
+# orjson is a faster JSON loader with a stdlib `json` fallback (utils/io_utils.py).
 # orjson

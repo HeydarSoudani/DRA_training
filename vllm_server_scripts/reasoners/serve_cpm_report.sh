@@ -1,28 +1,24 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────────────────────
-# Start a vLLM server for the AgentCPM-Explore model.
+# Start a vLLM server for the AgentCPM-Report model (and its finetuned variant).
 #
 # Usage:
-#   bash experiments/deep_research_agents/vllm_server_scripts/serve_cpm_explore.sh
-#   PORT=8000 bash experiments/deep_research_agents/vllm_server_scripts/serve_cpm_explore.sh
+#   bash experiments/deep_research_agents/vllm_server_scripts/serve_cpm_report.sh
+#   PORT=8000 bash experiments/deep_research_agents/vllm_server_scripts/serve_cpm_report.sh
 #
 # Requirements:
 #   - vLLM installed.
-#   - GPU(s): fits on 1× 80 GB GPU (TP=1 by default).
+#   - GPU(s): ~8B; fits on a single H100/A100 (TP auto-sized from GPU memory).
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/../_common.sh"
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 PORT="${PORT:-6008}"
-MODEL="${MODEL:-openbmb/AgentCPM-Explore}"
-TP_SIZE="${TP_SIZE:-1}"
-DOWNLOAD_DIR="${DOWNLOAD_DIR:-/mnt/sagemaker-nvme/huggingface/hub}"
+MODEL="${MODEL:-openbmb/AgentCPM-Report}"
+TP_SIZE="${TP_SIZE:-$(auto_tp 16 "1,2")}"
 
-# Ensure HF caches land on NVMe too
-export HF_HOME="${HF_HOME:-/mnt/sagemaker-nvme/huggingface}"
-
-# Skip GPU 0 if it is occupied by other processes
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-7}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-$(seq -s, 0 $((TP_SIZE - 1)))}"
 
 # ── Check vLLM is installed ───────────────────────────────────────────────────
 VLLM_VERSION=$(python -c "import vllm; print(vllm.__version__)" 2>/dev/null || echo "none")
@@ -46,5 +42,5 @@ exec vllm serve "$MODEL" \
     --download-dir "$DOWNLOAD_DIR" \
     --trust-remote-code \
     --gpu-memory-utilization 0.9 \
-    --max-model-len 32768 \
+    --max-model-len 65536 \
     --max-num-seqs 64

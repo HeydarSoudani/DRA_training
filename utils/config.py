@@ -4,8 +4,10 @@ No heavy imports — this module must be safe to import from anywhere
 without triggering circular dependencies.
 """
 
+import functools
+import os
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -31,9 +33,10 @@ def is_local_finetuned(agentic_model: str, llm_model: str) -> bool:
 
 # Single source of truth: CLI --agentic-model value → the LLM it runs on.
 # --llm-model is no longer a CLI input; it is derived from this map.
-# The `oss` agent is exposed as two CLI names (oss_20b / oss_120b) so both
-# GPT-OSS variants are selectable; AGENTIC_MODEL_ALIAS maps them back to the
-# internal "oss" agent used by AGENT_MAP / SELF_MANAGED_LLM_AGENTS.
+# Some agents are exposed under multiple CLI names so different model sizes are
+# selectable (oss_20b / oss_120b → "oss"; qwen3_4b_thinking / qwen3_30b_thinking
+# → "qwen3"); AGENTIC_MODEL_ALIAS maps each back to the internal agent name used
+# by AGENT_MAP / SELF_MANAGED_LLM_AGENTS.
 AGENTIC_MODEL_TO_LLM: Dict[str, str] = {
     # self-managed (vLLM)
     "cpm_report":  "openbmb/AgentCPM-Report",
@@ -42,6 +45,8 @@ AGENTIC_MODEL_TO_LLM: Dict[str, str] = {
     "tongyi":      "Alibaba-NLP/Tongyi-DeepResearch-30B-A3B",
     "oss_20b":     "gpt-oss-20b",
     "oss_120b":    "gpt-oss-120b",
+    "qwen3_4b_thinking":  "Qwen/Qwen3-4B-Thinking-2507",
+    "qwen3_30b_thinking": "Qwen/Qwen3-30B-A3B-Thinking-2507",
     # local-finetuned (vLLM)
     "webweaver":   "Alibaba-NLP/Tongyi-DeepResearch-30B-A3B",
     "drtulu":      "rl-research/DR-Tulu-8B",
@@ -58,6 +63,8 @@ AGENTIC_MODEL_TO_LLM: Dict[str, str] = {
 AGENTIC_MODEL_ALIAS: Dict[str, str] = {
     "oss_20b":  "oss",
     "oss_120b": "oss",
+    "qwen3_4b_thinking":  "qwen3",
+    "qwen3_30b_thinking": "qwen3",
 }
 
 
@@ -66,7 +73,59 @@ AGENTIC_MODEL_ALIAS: Dict[str, str] = {
 from indexing_corpus_dataset.layout import DATA_ROOT as _IR_ROOT
 
 # Agents that manage their own LLM connection (direct vLLM/OpenAI clients)
-SELF_MANAGED_LLM_AGENTS = frozenset({"oss", "tongyi", "glm", "cpm_explore", "cpm_report"})
+SELF_MANAGED_LLM_AGENTS = frozenset({"oss", "tongyi", "glm", "qwen3", "cpm_explore", "cpm_report"})
+
+
+# ---------------------------------------------------------------------------
+# OpenRouter routing (prefer hosted API over local GPU)
+# ---------------------------------------------------------------------------
+
+# OpenAI-compatible OpenRouter endpoint.
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+# Rough VRAM footprint (GB, fp16) of the fixed dense retriever (qwen3_emb_4b):
+# ~8 GB weights + activations for batched 8196-token queries.  FAISS lives on
+# CPU, so the retriever only needs this much GPU and can co-reside on a worker
+# GPU.  Used for the GPU-plan log; tune once measured.
+RETRIEVER_VRAM_GB = 14
+
+# Path to the static OpenRouter slug registry (filled in by the user).
+_OPENROUTER_REGISTRY_PATH = (
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    + "/experiments/configs/openrouter_registry.yaml"
+)
+
+
+@functools.lru_cache(maxsize=1)
+def load_openrouter_registry() -> Dict[str, str]:
+    """Load the agentic-model → OpenRouter-slug map from the registry file.
+
+    Returns an empty dict if the file is missing or empty, so every agent
+    safely falls back to the local vLLM path until slugs are filled in.
+    """
+    try:
+        import yaml  # lazy: keep this module import-light
+        with open(_OPENROUTER_REGISTRY_PATH) as fh:
+            data = yaml.safe_load(fh) or {}
+    except (FileNotFoundError, ImportError):
+        return {}
+    models = data.get("models") or {}
+    return {str(k): str(v) for k, v in models.items() if v}
+
+
+def resolve_agent_backend(agentic_model: str) -> Tuple[str, Optional[str]]:
+    """Decide how an agent's LLM is served.
+
+    Priority: if the agent is in the OpenRouter registry AND OPENROUTER_API_KEY
+    is set, use the hosted API (no local GPU).  Otherwise fall back to vLLM.
+
+    Returns:
+        ("api", openrouter_slug) or ("vllm", None).
+    """
+    slug = load_openrouter_registry().get(agentic_model)
+    if slug and os.getenv("OPENROUTER_API_KEY"):
+        return "api", slug
+    return "vllm", None
 
 
 # ---------------------------------------------------------------------------

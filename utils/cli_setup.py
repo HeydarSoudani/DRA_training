@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # File-backed run configuration
 # ============================================================================
 # The mostly-fixed pipeline variables live in a YAML config file
-# (experiments/configs/default.yaml) instead of as argparse `add_argument`
+# (experiments/configs/dra_inference.yaml) instead of as argparse `add_argument`
 # calls.  The frequently-varied knobs stay on the CLI; everything below is
 # sourced from the file but can still be overridden by an explicit CLI flag.
 #
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 # Built-in fallbacks, used only when a key is absent from the YAML file so that
 # downstream ``args.<attr>`` access never raises.  Keep in sync with the
-# shipped experiments/configs/default.yaml.
+# shipped experiments/configs/dra_inference.yaml.
 FILE_BACKED_DEFAULTS = {
     # LLM
     "llm_temperature": 0.0,
@@ -334,6 +334,7 @@ def assemble_pipeline_kwargs(args, llm_client, retriever, num_gpus: int, verbose
 
     worker_config = {
         "agentic_model":           args.agentic_model,
+        "agentic_model_cli":       getattr(args, "agentic_model_cli", args.agentic_model),
         "llm_model":               args.llm_model,
         "llm_temperature":         args.llm_temperature,
         "llm_max_tokens_per_call":          args.llm_max_tokens_per_call,
@@ -374,6 +375,7 @@ def assemble_pipeline_kwargs(args, llm_client, retriever, num_gpus: int, verbose
 
     pipeline_kwargs["num_gpus"]      = num_gpus
     pipeline_kwargs["worker_config"] = worker_config
+    pipeline_kwargs["agentic_model_cli"] = getattr(args, "agentic_model_cli", args.agentic_model)
     return pipeline_kwargs
 
 

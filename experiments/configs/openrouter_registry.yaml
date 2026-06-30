@@ -1,0 +1,19 @@
+# OpenRouter model registry
+# ---------------------------------------------------------------------------
+# Maps the internal --agentic-model name to its OpenRouter model slug.
+#
+# An entry here means: "this agent is available on OpenRouter — prefer the
+# hosted API over a local vLLM server (0 local GPU)."  Omit or comment out a
+# model to force the local vLLM path.
+#
+# Routing also requires the OPENROUTER_API_KEY env var to be set; if it is
+# missing, the agent falls back to vLLM even when listed here
+# (see utils.config.resolve_agent_backend).
+#
+# Fill in the exact slugs as you confirm them at https://openrouter.ai/models
+models:
+  glm: z-ai/glm-4.7-flash
+  oss_20b:  openai/gpt-oss-20b:free
+  oss_120b: openai/gpt-oss-120b:free
+  qwen3_30b_thinking: qwen/qwen3-30b-a3b-thinking-2507
+  # tongyi: alibaba/tongyi-deepresearch-30b-a3b

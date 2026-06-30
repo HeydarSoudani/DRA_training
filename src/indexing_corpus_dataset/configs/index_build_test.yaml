@@ -39,4 +39,4 @@ device_id: null         # GPU device id (e.g. 0, 1); null = auto. Ignored for MP
 query_key: null         # JSONL key for query text; null = auto ("text")
 min_relevance_score: null  # min qrel score treated as relevant; null = auto per dataset
 query_limit: 10         # max queries to use
-sub_corpus_max_size: 2000  # gold + distractors up to this many; null = gold only
+sub_corpus_max_size: 1500  # gold + distractors up to this many; null = gold only

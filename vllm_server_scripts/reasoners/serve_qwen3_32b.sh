@@ -1,36 +1,37 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────────────────────
-# Start a vLLM server for the OpenAI gpt-oss-20b model.
+# Start a vLLM server for Qwen3-32B used as the accuracy-evaluation judge.
 #
 # Usage:
-#   bash experiments/deep_research_agents/vllm_server_scripts/serve_gpt_oss.sh              # defaults: gpt-oss-20b, port 6008
-#   bash experiments/deep_research_agents/vllm_server_scripts/serve_gpt_oss.sh 120b         # serve gpt-oss-120b instead
-#   PORT=8000 bash experiments/deep_research_agents/vllm_server_scripts/serve_gpt_oss.sh    # custom port
+#   bash experiments/deep_research_agents/vllm_server_scripts/serve_qwen3_32b.sh
+#   PORT=6009 bash experiments/deep_research_agents/vllm_server_scripts/serve_qwen3_32b.sh
+#
+# The pipeline connects to this server via --judge-api-url
+# (default http://localhost:6009/v1).
+#
+# When started externally with this script, the pipeline skips its own
+# automatic judge-server lifecycle (start_judge_server / shutdown_judge_server).
+#
+# Parameters match the original AgentIR evaluation setup
+# (https://github.com/texttron/AgentIR/blob/main/evaluation/evaluate_bcp.py).
+# AgentIR uses vLLM offline with default TP=1; override TP_SIZE as needed.
 #
 # Requirements:
-#   - vLLM installed with gpt-oss support.
-#   - GPU(s): 20b fits on 1× L4 24 GB GPU (mxfp4 quantized MoE);
-#             120b needs TP=8 across 8 GPUs.
+#   - vLLM installed.
+#   - GPU(s): Qwen3-32B (~64 GB fp16).  TP auto-sized from GPU memory: TP=1 on a
+#             94 GB H100, TP=2 on a 40 GB A100.  Override TP_SIZE to spread wider.
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/../_common.sh"
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-VARIANT="${1:-20b}"                         # "20b" or "120b"
-PORT="${PORT:-6008}"
-MODEL="openai/gpt-oss-${VARIANT}"
-DOWNLOAD_DIR="${DOWNLOAD_DIR:-/mnt/sagemaker-nvme/huggingface/hub}"
-
-# Ensure HF caches land on NVMe too
-export HF_HOME="${HF_HOME:-/mnt/sagemaker-nvme/huggingface}"
-
-if [[ "$VARIANT" == "120b" ]]; then
-    TP_SIZE="${TP_SIZE:-8}"                  # 120b: tensor-parallel across GPUs
-else
-    TP_SIZE="${TP_SIZE:-1}"                  # 20b:  single GPU is enough (mxfp4)
-fi
+PORT="${PORT:-6009}"
+MODEL="${MODEL:-Qwen/Qwen3-32B}"
+TP_SIZE="${TP_SIZE:-$(auto_tp 64 "1,2,4")}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 
 # Pin vLLM to the first TP_SIZE GPUs (0..TP_SIZE-1) so the remaining GPUs
-# stay free for retrieval workers.
+# stay free for pipeline workers.
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-$(seq -s, 0 $((TP_SIZE - 1)))}"
 
 # ── Check vLLM is installed ───────────────────────────────────────────────────
@@ -43,19 +44,19 @@ echo "Using vLLM ${VLLM_VERSION}"
 
 # ── Launch ────────────────────────────────────────────────────────────────────
 echo ""
-echo "Starting vLLM server:"
-echo "  Model : ${MODEL}"
-echo "  Port  : ${PORT}"
-echo "  TP    : ${TP_SIZE}"
-echo "  GPUs  : ${CUDA_VISIBLE_DEVICES}"
+echo "Starting vLLM accuracy-evaluation judge server (Qwen3-32B):"
+echo "  Model        : ${MODEL}"
+echo "  Port         : ${PORT}"
+echo "  TP           : ${TP_SIZE}"
+echo "  Max seq len  : ${MAX_MODEL_LEN}"
+echo "  GPUs         : ${CUDA_VISIBLE_DEVICES}"
 echo ""
 
 exec vllm serve "$MODEL" \
     --port "$PORT" \
     --tensor-parallel-size "$TP_SIZE" \
+    --max-model-len "$MAX_MODEL_LEN" \
+    --max-num-seqs "${MAX_NUM_SEQS:-4}" \
     --download-dir "$DOWNLOAD_DIR" \
     --trust-remote-code \
-    --max-model-len 131072 \
-    --max-num-seqs 16 \
-    --gpu-memory-utilization 0.90 \
-    --enforce-eager
+    --gpu-memory-utilization 0.90

@@ -13,14 +13,16 @@ Supported agents via --agentic-model (the LLM is selected automatically per agen
     glm             GLM reasoning agent                            → zai-org/GLM-4.7-Flash (vLLM)
     oss_20b         GPT-OSS-20B reasoning agent                    → gpt-oss-20b (vLLM)
     oss_120b        GPT-OSS-120B reasoning agent                   → gpt-oss-120b (vLLM)
+    qwen3_4b_thinking   Qwen3-Thinking reasoning agent             → Qwen/Qwen3-4B-Thinking-2507 (vLLM)
+    qwen3_30b_thinking  Qwen3-Thinking reasoning agent             → Qwen/Qwen3-30B-A3B-Thinking-2507 (vLLM)
     tongyi          Tongyi-DeepResearch ReAct agent                → Alibaba-NLP/Tongyi-DeepResearch-30B-A3B (vLLM)
     cpm_explore     AgentCPM-Explore deep search agent             → openbmb/AgentCPM-Explore (vLLM)
 
 Agentic workflows:
-    ReAct-style (react, selfask, searcho1, research, searchr1, stepsearch, drtulu, glm, oss_20b, oss_120b, tongyi, cpm_explore):
+    ReAct-style (react, selfask, searcho1, research, searchr1, stepsearch, drtulu, glm, oss_20b, oss_120b, qwen3_4b_thinking, qwen3_30b_thinking, tongyi, cpm_explore):
         Query → [Think → Search → Observe]* → Report → Evaluate
         Instruction-tuned : react, selfask, searcho1
-        RL-trained        : research, searchr1, stepsearch, drtulu, tongyi, cpm_explore, glm, oss_20b, oss_120b
+        RL-trained        : research, searchr1, stepsearch, drtulu, tongyi, cpm_explore, glm, oss_20b, oss_120b, qwen3_4b_thinking, qwen3_30b_thinking
 
     Outline-style (webweaver):
         Query → [Think → Search → Write_outline]* → Outline → [Think → Retrieve → Write_section]* → Report → Evaluate
@@ -102,7 +104,7 @@ from evaluation.retrieval.fusion import run_fusion_eval
 _OUTPUT_PREFIX = os.environ.get(
     "DRA_OUTPUT_ROOT", "/projects/0/prjs0834/heydars/DRA_training/run_outputs"
 )
-_CONFIG_DEFAULT = str(Path(__file__).resolve().parent / "configs" / "default.yaml")
+_CONFIG_DEFAULT = str(Path(__file__).resolve().parent / "configs" / "dra_inference.yaml")
 
 
 # ============================================================================
@@ -291,6 +293,7 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
     if num_gpus <= 1 and queries:
         agent = build_agent(
             agentic_model=agentic_model,
+            agentic_model_cli=kwargs.get("agentic_model_cli", agentic_model),
             llm_model=llm_model,
             llm_client=kwargs.get("llm_client"),
             retriever=_retriever,
@@ -585,7 +588,7 @@ def _parse_args():
 
     Only the frequently-varied knobs are declared as CLI arguments.  The
     mostly-fixed variables live in a YAML config file (``--config``, default
-    experiments/configs/default.yaml) and are merged onto ``args`` afterwards;
+    experiments/configs/dra_inference.yaml) and are merged onto ``args`` afterwards;
     any of them can still be overridden by passing the matching ``--flag`` on
     the command line (handled via ``parse_known_args`` -> ``apply_config_to_args``).
     """
@@ -598,10 +601,10 @@ def _parse_args():
     parser.add_argument("--config", type=str, default=_CONFIG_DEFAULT, help="Path to the YAML file holding the mostly-fixed pipeline variables. Any value in it can be overridden by passing the matching --flag on the CLI.")
 
     # ── Frequently-varied knobs (everything else lives in --config) ─────────
-    parser.add_argument("--agentic-model", type=str, default="glm", choices=list(AGENTIC_MODEL_TO_LLM), help="Agent to run; the LLM is selected automatically from the agent. cpm_report = Writing-as-Reasoning (report generation); searchr1/research/stepsearch/react/selfask/searcho1 = Reasoning-augmented retrieval; glm/oss_20b/oss_120b/tongyi = vendor-specific ReAct agents.")
+    parser.add_argument("--agentic-model", type=str, default="qwen3_4b_thinking", choices=list(AGENTIC_MODEL_TO_LLM), help="Agent to run; the LLM is selected automatically from the agent. cpm_report = Writing-as-Reasoning (report generation); searchr1/research/stepsearch/react/selfask/searcho1 = Reasoning-augmented retrieval; glm/oss_20b/oss_120b/qwen3_4b_thinking/qwen3_30b_thinking/tongyi = vendor-specific ReAct agents.")
     parser.add_argument("--dataset", type=str, default="trqa", choices=["trqa", "browsecomp_plus", "neuclir"], help="Dataset. trqa/neuclir/browsecomp_plus use local indices.")
     parser.add_argument("--retriever", type=str, default="qwen3_emb_4b", choices=["bm25", "spladepp", "spladev3", "rerank_l6", "rerank_l12", "contriever", "dpr", "e5", "bge", "qwen3_emb_0.6b", "qwen3_emb_4b", "qwen3_emb_8b", "agentir_4b"], help="Retriever type for public datasets (neuclir only)")
-    parser.add_argument("--controller", type=str, default="action", choices=["off", "monitor", "action"], help="Controller mode. 'off': disabled. 'monitor': compute and log scores only, no intervention. 'action': controller takes corrective actions (intervene/stop) via the controller policy.")
+    parser.add_argument("--controller", type=str, default="off", choices=["off", "monitor", "action"], help="Controller mode. 'off': disabled. 'monitor': compute and log scores only, no intervention. 'action': controller takes corrective actions (intervene/stop) via the controller policy.")
     parser.add_argument("--controller-prompt-variant", type=str, default="nov_cov_sim", choices=["nov", "nov_cov", "nov_sim", "nov_cov_sim", "sim", "cov_sim"], help="Controller policy prompt variant controlling which signals the controller sees. 'nov': novelty only. 'nov_cov': novelty + criteria coverage. 'nov_sim': novelty + consec_query_sim + orig_query_sim. 'nov_cov_sim': novelty + criteria coverage + consec_query_sim + orig_query_sim. 'sim': consec_query_sim (primary) + orig_query_sim (guardrail). 'cov_sim': criteria coverage (primary) + consec_query_sim + orig_query_sim (no novelty). Default: 'nov_cov_sim'.")
 
     # ── Run-control flags ───────────────────────────────────────────────────
@@ -617,11 +620,9 @@ def _parse_args():
     overrides = parse_cli_overrides(extras)
     apply_config_to_args(args, config, overrides)
 
-    # ── Derive --llm-model from --agentic-model ────────────────────────────
-    # --llm-model is not a user input; the agent fully determines the LLM.
-    # Resolve the model from the CLI key FIRST (oss_20b / oss_120b are distinct
-    # keys), then collapse the CLI key to its internal agent name.
+    # ── Derive --llm-model from --agentic-model ────────────────────────────-
     args.llm_model = AGENTIC_MODEL_TO_LLM[args.agentic_model]
+    args.agentic_model_cli = args.agentic_model
     args.agentic_model = AGENTIC_MODEL_ALIAS.get(args.agentic_model, args.agentic_model)
 
     if args.output is None:
@@ -683,6 +684,19 @@ def main():
         total_gpus_on_machine = max(1, torch.cuda.device_count())
     except ImportError:
         total_gpus_on_machine = num_gpus
+
+    # ── GPU plan: retriever first (fixed footprint), then agent ──────────
+    from utils.config import resolve_agent_backend, RETRIEVER_VRAM_GB
+    _agent_backend, _agent_slug = resolve_agent_backend(args.agentic_model_cli)
+    print(f"[GPU Plan] total GPUs : {total_gpus_on_machine}")
+    print(f"[GPU Plan] retriever  : {args.retriever} "
+          f"(~{RETRIEVER_VRAM_GB} GB fp16, FAISS on CPU — shares a worker GPU)")
+    if _agent_backend == "api":
+        print(f"[GPU Plan] agent      : {args.agentic_model} → "
+              f"OpenRouter '{_agent_slug}' (0 local GPU)")
+    else:
+        print(f"[GPU Plan] agent      : {args.agentic_model} → "
+              f"local vLLM (reserves leftmost GPUs)")
 
     if args.eval_only:
         # Eval-only: skip LLM/reranker vLLM servers — only the judge server
@@ -813,4 +827,4 @@ if __name__ == "__main__":
 #   CUDA_VISIBLE_DEVICES=5,6 python experiments/dra_inference.py --dataset browsecomp_plus --limit 1
 #   CUDA_VISIBLE_DEVICES=0,1,2 python experiments/dra_inference.py --dataset neuclir --limit 1
 #   python experiments/dra_inference.py --dataset neuclir --num-gpus 6 --quiet --limit 6
-#   python experiments/dra_inference.py --dataset browsecomp_plus --eval-only --num-gpus 8 --quiet --limit 12
+#   python experiments/dra_inference.py --dataset trqa --limit 1

@@ -100,7 +100,7 @@ python experiments/dra_inference.py --dataset browsecomp_plus --eval-only --num-
 ```
 
 Run defaults (top_k, rerankers, controller LLM, eval k-values, …) are in
-`experiments/configs/default.yaml`.
+`experiments/configs/dra_inference.yaml`.
 
 ### Output format
 
@@ -116,15 +116,6 @@ $DRA_OUTPUT_ROOT/{dataset}_{split}_{query_key}_{retriever}/{agent}_agent_{model}
 └── summary.json                    metrics
 ```
 
-## Layout
+## 4. Training
 
-Dependency direction is one-way: `experiments → pipeline → src → utils`.
-
-```
-utils/         Leaf helpers (config, io, llm_client, vllm_manager).
-pipeline/      Orchestration, multi-GPU workers, evaluation/fusion.
-src/           Components: deep_research_agents, searcher_component,
-               reasoner_component, controller_component, evaluation,
-               indexing_corpus_dataset.
-experiments/   CLI entry points (dra_inference.py, dra_train.py).
-```
+> 🚧 Under construction.

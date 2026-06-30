@@ -219,7 +219,7 @@ def _parse_args():
 
     parser.add_argument('--config', type=str, default=TEST_CONFIG_DEFAULT, help='Path to the YAML config holding the mostly-fixed test variables. Any value in it can be overridden by passing the matching --flag.')
     parser.add_argument('--retriever', type=str, default='qwen3_emb_4b', dest='retriever', choices=['bm25', 'spladepp', 'spladev3', 'contriever', 'dpr', 'e5', 'bge', 'qwen3_emb_0.6b', 'qwen3_emb_4b', 'qwen3_emb_8b', 'rerank_l6', 'rerank_l12'])
-    parser.add_argument('--dataset', type=str, default='browsecomp_plus', choices=['trqa', 'neuclir', 'browsecomp_plus'], help='Dataset name; corpus and index paths are derived from it.')
+    parser.add_argument('--dataset', type=str, default='trqa', choices=['trqa', 'browsecomp_plus', 'neuclir'], help='Dataset name; corpus and index paths are derived from it.')
 
     args, extras = parser.parse_known_args()
 
@@ -468,4 +468,4 @@ if __name__ == "__main__":
 #
 # python src/indexing_corpus_dataset/index_builder_test.py
 # python src/indexing_corpus_dataset/index_builder_test.py --dataset neuclir --retriever bge
-# python src/indexing_corpus_dataset/index_builder_test.py --dataset browsecomp_plus
+# python src/indexing_corpus_dataset/index_builder_test.py --dataset trqa

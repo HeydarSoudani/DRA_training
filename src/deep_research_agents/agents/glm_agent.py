@@ -95,7 +95,7 @@ class GLM_Agent(BasicAgent):
 
     AGENT_NAME = "GLM"
 
-    def __init__(self, llm_client=None, retriever=None, max_iteration: int = 100, seen_top_k: int = 5, model_url: Optional[str] = None, model_name: str = "zai-org/GLM-4.7-Flash", max_output_tokens: int = 20000, system_prompt: Optional[str] = None, verbose: bool = True, **kwargs) -> None:
+    def __init__(self, llm_client=None, retriever=None, max_iteration: int = 100, seen_top_k: int = 5, model_url: Optional[str] = None, model_name: str = "zai-org/GLM-4.7-Flash", max_output_tokens: int = 20000, system_prompt: Optional[str] = None, verbose: bool = True, api_key: Optional[str] = None, **kwargs) -> None:
         super().__init__(llm_client, retriever, max_iteration, seen_top_k)
 
         self.model_url = model_url or os.getenv(
@@ -104,7 +104,13 @@ class GLM_Agent(BasicAgent):
         self.model_name = model_name
         self.max_output_tokens = max_output_tokens
         self.verbose = verbose
-        self._api_key = os.getenv("GLM_API_KEY", "EMPTY")
+        self._api_key = api_key or os.getenv("GLM_API_KEY", "EMPTY")
+
+        # Per-call output caps. Subclasses serving reasoning ("thinking") models
+        # raise these so a full reasoning block fits before a tool call / answer
+        # is forced (see Qwen3_Agent).
+        self._max_tokens_per_call = 4096
+        self._answer_candidate_max_tokens = 1024
 
         from utils.token_meter import TokenMeter
         self.token_meter = TokenMeter()
@@ -163,7 +169,7 @@ class GLM_Agent(BasicAgent):
             response = client.chat.completions.create(
                 model=cfg.model_name,
                 messages=messages,
-                max_tokens=min(remaining_tokens, 1024),
+                max_tokens=min(remaining_tokens, self._answer_candidate_max_tokens),
             )
         except Exception:
             logger.warning("Answer candidate API call failed", exc_info=True)
@@ -241,7 +247,7 @@ class GLM_Agent(BasicAgent):
         self._reasoning_only_retries = 0
         iteration = 1
         while iteration <= self.max_iteration:
-            remaining_tokens = min(self.max_output_tokens - self._cumulative_output_tokens, 4096)
+            remaining_tokens = min(self.max_output_tokens - self._cumulative_output_tokens, self._max_tokens_per_call)
             if remaining_tokens <= 0:
                 logger.info("Global output token budget exhausted, forcing final answer")
                 self._print("Token budget exhausted, forcing final answer in conversation")
@@ -262,6 +268,10 @@ class GLM_Agent(BasicAgent):
                     })
                 break
             try:
+                # `generation_temp` is intentionally NOT forwarded: sampling is
+                # left to the served model's generation_config defaults. This is
+                # required for Qwen3-Thinking models, whose model card forbids
+                # greedy/temperature=0 decoding (the pipeline default is 0.0).
                 response = client.chat.completions.create(
                     model=cfg.model_name,
                     messages=messages,

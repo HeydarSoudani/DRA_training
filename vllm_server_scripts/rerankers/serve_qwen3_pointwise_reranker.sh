@@ -18,16 +18,13 @@
 #   - GPU(s): 0.6B fits on any GPU, 4B on 1× 40 GB, 8B on 1× 80 GB GPU (TP=1).
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/../_common.sh"
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 PORT="${PORT:-8000}"
 MODEL_SIZE="${MODEL_SIZE:-8B}"
 MODEL="${MODEL:-Qwen/Qwen3-Reranker-${MODEL_SIZE}}"
-TP_SIZE="${TP_SIZE:-1}"
-DOWNLOAD_DIR="${DOWNLOAD_DIR:-/mnt/sagemaker-nvme/huggingface/hub}"
-
-# Ensure HF caches land on NVMe too
-export HF_HOME="${HF_HOME:-/mnt/sagemaker-nvme/huggingface}"
+TP_SIZE="${TP_SIZE:-$(auto_tp 16 "1,2")}"
 
 # ── Check vLLM is installed ───────────────────────────────────────────────────
 VLLM_VERSION=$(python -c "import vllm; print(vllm.__version__)" 2>/dev/null || echo "none")

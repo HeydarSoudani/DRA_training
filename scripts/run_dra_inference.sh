@@ -10,16 +10,13 @@
 # vLLM manager auto-splits GPUs: model server takes the leftmost GPU(s),
 # the rest become pipeline workers. SBU is billed on actual runtime, not --time.
 
-# sbatch runs non-interactively, so activate the base env (with torch/faiss) explicitly.
-source /sw/arch/RHEL9/EB_production/2024/software/Anaconda3/2024.06-1/etc/profile.d/conda.sh
-conda activate base
+# sbatch runs non-interactively; scripts/_activate.sh loads the Python/3.13.5 module
+# stack, activates the project venv (torch/faiss/vllm), and exports the project
+# env vars (HF_HOME, DRA_DATA_ROOT, DRA_OUTPUT_ROOT, ...) — same env as interactive.
+# Sourced CWD-relative: sbatch preserves the submission dir (the repo root), which
+# is also why the python/log paths below are relative.
+source scripts/_activate.sh
 mkdir -p script_logging
-
-export PYTHONUNBUFFERED=1
-export HF_DATASETS_CACHE=/projects/0/prjs0834/heydars/.cache/huggingface
-export HF_HOME=/projects/0/prjs0834/heydars/.cache/huggingface
-export DRA_DATA_ROOT=/projects/0/prjs0834/heydars/DRA_training/data
-export DRA_OUTPUT_ROOT=/home/hsoudani/DRA_training/run_outputs
 
 # DATASET + RETRIEVER must match the built index (see scripts/run_index_builder.sh).
 DATASET=browsecomp_plus            # trqa | neuclir | browsecomp_plus
