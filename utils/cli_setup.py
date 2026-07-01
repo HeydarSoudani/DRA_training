@@ -76,7 +76,7 @@ FILE_BACKED_DEFAULTS = {
     "rrf_k": 60,
     "fusion_k": 100,
     "fusion_methods": ["interleaving"],
-    "judge_api_url": None,
+    "judge_model": "openrouter/qwen/qwen3-32b",
     # Execution & output
     "output": None,
     "max_iteration": 100,

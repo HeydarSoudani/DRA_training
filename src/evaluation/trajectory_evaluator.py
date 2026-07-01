@@ -93,76 +93,79 @@ def _get_num_docs(step: Dict[str, Any]) -> int:
     return 0
 
 
-def _clean_trajectory_for_save(trajectory: list) -> list:
-    """Clean trajectory steps before saving to disk.
+def _seen_doc_ids(step: Dict[str, Any]) -> List[str]:
+    """Return the *seen* (top-k, injected-into-prompt) doc ids for a step.
 
-    Per-step transformations:
-    - Remove ``all_docs`` (redundant with ``docs``).
-    - Reduce every doc to a bare ``{"doc_id": ...}`` entry.  No document text,
-      title, or metadata is ever written — the ranked *order* of docs within a
-      step is preserved so retrieval evaluation can reconstruct per-step
-      rankings positionally, and exact scores remain in the retrieval/seen
-      ``.trec`` files.  Docs without a resolvable id are dropped.
+    Reasoning agents (GLM, OSS, Tongyi, WebWeaver) store these under
+    ``component_doc_ids``; AgentCPM under ``output.doc_ids``.  Already-cleaned
+    trajectories loaded from disk expose them under ``seen_docs``.  The full
+    surfaced ranking (``docs``/``all_docs``) is deliberately *not* written to
+    the trajectory — it lives only in ``retrieval/surfaced/{qid}.trec``.
     """
-    cleaned_steps = []
-    for step in trajectory:
-        step = dict(step)  # shallow copy
-
-        # Remove all_docs — docs is sufficient
-        step.pop("all_docs", None)
-
-        if step.get("docs"):
-            step["docs"] = [
-                {"doc_id": did}
-                for doc in step["docs"]
-                if (did := (doc.get("doc_id") or doc.get("id")))
-            ]
-
-        cleaned_steps.append(step)
-    return cleaned_steps
+    ids = step.get("component_doc_ids") or step.get("seen_docs")
+    if not ids:
+        output = step.get("output")
+        if isinstance(output, dict):
+            ids = output.get("doc_ids")
+    return [did for did in (ids or []) if did]
 
 
-def _fold_controller_into_steps(
-    trajectory: list, score_history: Optional[list],
-) -> list:
-    """Attach controller decisions to their matching search step.
+def _iter_label(step: Dict[str, Any], fallback_iter: int) -> str:
+    """Build the per-line iteration label, e.g. ``"1"`` or ``"1.2"``.
 
-    The controller produces one score-history entry per search/post-search
-    evaluation.  These entries are matched positionally to the trajectory's
-    search steps (1:1 in order), so each search step gains the controller's
-    ``controller_action`` (one of continue/intervene/stop) and
-    ``controller_reasoning`` — the same field names the controller uses.
-    Non-search steps and unmatched entries are left untouched.  The full
-    per-iteration signal record remains available separately under
-    ``controller_score_history``.
+    A single-query iteration is labelled by its iteration number alone; an
+    iteration with multiple subqueries becomes ``{iteration}.{subquery}``
+    (1-based subquery index), so the three searches of iteration 1 read
+    ``1.1``, ``1.2``, ``1.3``.  Steps without an ``iteration`` field (terminal
+    answer / force-answer steps) fall back to *fallback_iter*.
     """
-    if not score_history:
-        return trajectory
+    it = step.get("iteration")
+    if it is None:
+        return str(fallback_iter)
+    sub = step.get("sub_iter")
+    if sub is None:
+        return str(it)
+    return f"{it}.{int(sub) + 1}"
 
-    by_iter: Dict[Any, Dict[str, Any]] = {}
-    for idx, sc in enumerate(score_history):
-        by_iter[sc.get("iter_num", idx)] = sc
 
-    search_idx = 0
-    out = []
-    for step in trajectory:
-        is_search = bool(
-            step.get("docs") or step.get("all_docs")
-            or step.get("component_doc_ids") or step.get("search_query")
-        )
-        if is_search:
-            sc = by_iter.get(search_idx)
-            if sc is not None and "controller_action" not in step:
-                folded = {}
-                if sc.get("controller_action") is not None:
-                    folded["controller_action"] = sc["controller_action"]
-                if sc.get("controller_reasoning") is not None:
-                    folded["controller_reasoning"] = sc["controller_reasoning"]
-                if folded:
-                    step = {**step, **folded}
-            search_idx += 1
-        out.append(step)
-    return out
+def _step_to_line(step: Dict[str, Any], iter_label: str) -> Dict[str, Any]:
+    """Reduce one trajectory step to a compact JSONL line.
+
+    Search steps carry ``search_query`` + ``seen_docs`` (+ ``think`` only when
+    present, i.e. on the first subquery of an iteration).  Terminal steps carry
+    ``action_type`` + ``generation``.  The full surfaced doc list is dropped.
+
+    ``action_type`` is emitted on the first subquery of an iteration only
+    (``sub_iter`` is ``None`` or ``0``), mirroring how ``think`` appears only on
+    the first subquery — the later subqueries (``1.2``, ``1.3``, …) share the
+    same action and are left unannotated.
+    """
+    search_query = step.get("search_query")
+    if search_query:
+        line: Dict[str, Any] = {"iter": iter_label}
+        atype = step.get("action_type") or step.get("action")
+        if atype and step.get("sub_iter") in (None, 0):
+            line["action_type"] = atype
+        if step.get("think"):
+            line["think"] = step["think"]
+        line["search_query"] = search_query
+        seen = _seen_doc_ids(step)
+        if seen:
+            line["seen_docs"] = seen
+        if step.get("tokens") is not None:
+            line["tokens"] = step["tokens"]
+        return line
+
+    # Terminal / non-search step (answer, context_limit, max_iter_force, …).
+    line = {"iter": iter_label}
+    atype = step.get("action_type") or step.get("action")
+    if atype:
+        line["action_type"] = atype
+    if step.get("think"):
+        line["think"] = step["think"]
+    if step.get("generation"):
+        line["generation"] = step["generation"]
+    return line
 
 
 def _is_search_step(action_type: str, step: Dict[str, Any]) -> bool:
@@ -383,63 +386,62 @@ class TrajectoryEvaluator:
         print("=" * 80)
 
     def save_item(self, query_id: str, question: str, result: Dict[str, Any], output_dir) -> None:
-        """Save per-query trajectory as a JSON file.
+        """Save per-query trajectory as a JSONL file (one line per step).
 
-        The file contains the full trajectory along with metadata needed to
-        reconstruct the result for resumed runs (generation, step counts,
-        citation mapping, etc.).
+        Line 1 is a ``{"record": "meta", ...}`` header carrying the metadata
+        needed to reconstruct the result on resume (generation, step counts,
+        agent-specific resume data).  Each subsequent line is one trajectory
+        step: search steps carry ``iter`` / ``action_type`` / ``think`` /
+        ``search_query`` / ``seen_docs`` (``action_type`` and ``think`` only on
+        the first subquery of an iteration); terminal steps carry ``iter`` /
+        ``action_type`` /
+        ``generation``.
 
-        Supports both local paths and S3 URIs.
+        Deliberately *not* stored here (to avoid duplicating data that lives
+        elsewhere):
+        - the full surfaced doc ranking → ``retrieval/surfaced/{qid}.trec``;
+        - controller decisions / score history → ``controller/{qid}.jsonl``;
+        - cited docs → ``retrieval/cited/{qid}.trec``.
 
         Args:
             query_id:   Query identifier.
             question:   Original query text.
             result:     Unified agent result dict for this query.
-            output_dir: Directory where ``{query_id}.json`` will be written.
+            output_dir: Directory where ``{query_id}.jsonl`` will be written.
         """
         output_dir_str = str(output_dir)
         Path(output_dir_str).mkdir(parents=True, exist_ok=True)
-        item: Dict[str, Any] = {
+
+        meta: Dict[str, Any] = {
+            "record": "meta",
             "qid": query_id,
             "question": question,
-            "trajectory": result.get("trajectory", []),
             "generation": result.get("generation", ""),
             "num_steps": result.get("num_steps", 0),
             "num_searches": result.get("num_searches", 0),
             "num_iterations": result.get("num_iterations"),
         }
-        # Preserve agent-specific metadata when present.
-        #
-        # Note: the full ``controller_score_history`` (and its ``*_unique_doc_*``
-        # companions) is deliberately NOT duplicated here — it is persisted once
-        # by ``ControllerEvaluator`` under ``controller/{qid}.json`` and the
-        # controller *decisions* are folded into the search steps below.  The
-        # eval loader reconstructs the history from the controller file on
-        # resume.
-        for optional_key in (
-            "citation_to_doc_id",
-            "cited_docs_ranked_list",
-            "memory_bank",
-            "query_outputs",       # GTR baseline metadata
-            "token_usage",
-        ):
-            if optional_key in result and result[optional_key]:
-                item[optional_key] = result[optional_key]
+        # Agent-specific resume data that isn't persisted in any other file.
+        for optional_key in ("memory_bank", "query_outputs"):
+            if result.get(optional_key):
+                meta[optional_key] = result[optional_key]
 
-        # Fold controller decisions into their matching search steps so the
-        # trajectory log carries reasoning + query + doc ids + controller values
-        # + tokens in one place.
-        item["trajectory"] = _fold_controller_into_steps(
-            item["trajectory"],
-            result.get("controller_score_history") or result.get("tracker_score_history"),
-        )
+        def _dump(obj: Dict[str, Any]) -> str:
+            return json.dumps(obj, separators=(",", ":"), default=str)
 
-        # Clean trajectory: remove all_docs and reduce docs to bare doc ids.
-        item["trajectory"] = _clean_trajectory_for_save(item["trajectory"])
-
-        json_path = f"{output_dir_str.rstrip('/')}/{query_id}.json"
+        json_path = f"{output_dir_str.rstrip('/')}/{query_id}.jsonl"
         with open(json_path, "w") as f:
-            json.dump(item, f, separators=(",", ":"), default=str)
+            f.write(_dump(meta) + "\n")
+            last_iter = 0
+            for step in result.get("trajectory", []):
+                it = step.get("iteration")
+                if it is not None:
+                    last_iter = int(it)
+                    label = _iter_label(step, last_iter)
+                else:
+                    last_iter += 1
+                    label = _iter_label(step, last_iter)
+                f.write(_dump(_step_to_line(step, label)) + "\n")
 
     def save_results(self, metrics: Dict[str, Any], output_path, summary: Optional[Dict[str, Any]] = None, summary_path=None) -> None:
         """Save trajectory statistics and optionally the run summary to JSON files.

@@ -38,9 +38,10 @@ def _extract_seen_iterations(
         # AgentCPM stores seen doc IDs in step["output"]["doc_ids"]
         output = step.get("output", {})
         doc_ids = output.get("doc_ids") if isinstance(output, dict) else None
-        # Reasoning agents store them in step["component_doc_ids"]
+        # Reasoning agents store them in step["component_doc_ids"] at inference
+        # time; trajectories reloaded from the JSONL expose them as "seen_docs".
         if not doc_ids:
-            doc_ids = step.get("component_doc_ids")
+            doc_ids = step.get("component_doc_ids") or step.get("seen_docs")
         if doc_ids:
             iterations.append([{"doc_id": did} for did in doc_ids if did])
     return iterations

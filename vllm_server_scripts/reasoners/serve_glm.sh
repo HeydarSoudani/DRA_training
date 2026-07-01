@@ -9,7 +9,8 @@
 # Requirements:
 #   - vLLM installed.
 #   - GPU(s): 30B fp16 (~60 GB).  TP auto-sized from GPU memory: TP=1 on a
-#     94 GB H100, TP=2 on a 40 GB A100.  20 attention heads → TP must divide 20.
+#     single 80+ GB H100/A100, TP=2 only on smaller cards.  20 attention heads
+#     → TP must divide 20.
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../_common.sh"
@@ -47,9 +48,9 @@ exec vllm serve "$MODEL" \
     --pipeline-parallel-size "$PP_SIZE" \
     --download-dir "$DOWNLOAD_DIR" \
     --trust-remote-code \
-    --max-model-len 65536 \
+    --max-model-len 202752 \
     --max-num-seqs 16 \
     --gpu-memory-utilization 0.90 \
-    --enforce-eager \
+    --enable-prefix-caching \
     --enable-auto-tool-choice \
     --tool-call-parser glm47

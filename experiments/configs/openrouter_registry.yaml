@@ -12,8 +12,14 @@
 #
 # Fill in the exact slugs as you confirm them at https://openrouter.ai/models
 models:
-  glm: z-ai/glm-4.7-flash
   oss_20b:  openai/gpt-oss-20b:free
   oss_120b: openai/gpt-oss-120b:free
-  qwen3_30b_thinking: qwen/qwen3-30b-a3b-thinking-2507
+  glm: z-ai/glm-4.7-flash
   # tongyi: alibaba/tongyi-deepresearch-30b-a3b
+
+# Optional curated short labels used in output directory names, keyed by the
+# full model id (--llm-model / AGENTIC_MODEL_TO_LLM value).  When a model is
+# absent here, the label falls back to the last path segment, lowercased
+# (e.g. zai-org/GLM-4.7-Flash -> glm-4.7-flash).
+display_names:
+  # zai-org/GLM-4.7-Flash: glm-4.7-flash

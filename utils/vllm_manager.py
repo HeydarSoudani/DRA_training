@@ -112,12 +112,14 @@ _LLM_SERVER_SPECS: Dict[str, ServerSpec] = {
     ),
     "glm": ServerSpec(
         model="zai-org/GLM-4.7-Flash",
-        port=6008, tp_size=2,
-        max_model_len=65536, max_num_seqs=16,
+        port=6008, tp_size=1,
+        max_model_len=202752, max_num_seqs=16,   # full native context (~198K)
         gpu_memory_utilization=0.90,
         enforce_eager=False,
         enable_prefix_caching=True,
-        model_gb=60.0, allowed_tp=(1, 2, 4),   # 30B fp16; 20 heads → TP|20
+        model_gb=60.0, allowed_tp=(1, 2, 4),   # 30B fp16 (~60 GB) fits one
+                                               # H100/A100-80GB; _fit_tp bumps to
+                                               # 2 only on smaller cards. 20 heads → TP|20
         extra_args=["--enable-auto-tool-choice", "--tool-call-parser", "glm47"],
         label="GLM-4.7-Flash",
     ),
@@ -131,40 +133,6 @@ _LLM_SERVER_SPECS: Dict[str, ServerSpec] = {
         model_gb=61.0, allowed_tp=(1, 2, 4),   # 30B MoE; kv_heads=4 → TP|4
         extra_args=["--enable-auto-tool-choice", "--tool-call-parser", "hermes"],
         label="Tongyi-DeepResearch-30B",
-    ),
-    "qwen3:Qwen/Qwen3-4B-Thinking-2507": ServerSpec(
-        model="Qwen/Qwen3-4B-Thinking-2507",
-        port=6008, tp_size=1,
-        max_model_len=131072, max_num_seqs=16,
-        gpu_memory_utilization=0.90,
-        enforce_eager=False,
-        enable_prefix_caching=True,
-        model_gb=9.0, allowed_tp=(1, 2, 4),    # 4B fp16
-        # Thinking models emit a reasoning block closed by </think>; the
-        # deepseek_r1 reasoning parser routes it to message.reasoning_content
-        # (vLLM 0.8.3 has no dedicated qwen3 parser, and deepseek_r1 handles the
-        # missing opening <think> tag that the 2507 models omit).
-        # NOTE: --enable-reasoning was removed in vLLM >=0.9; passing
-        # --reasoning-parser now enables reasoning implicitly.
-        extra_args=["--reasoning-parser", "deepseek_r1",
-                    "--enable-auto-tool-choice", "--tool-call-parser", "hermes"],
-        label="Qwen3-4B-Thinking-2507",
-    ),
-    "qwen3:Qwen/Qwen3-30B-A3B-Thinking-2507": ServerSpec(
-        model="Qwen/Qwen3-30B-A3B-Thinking-2507",
-        port=6008, tp_size=2,
-        max_model_len=131072, max_num_seqs=16,
-        gpu_memory_utilization=0.90,
-        enforce_eager=False,
-        enable_prefix_caching=True,
-        model_gb=61.0, allowed_tp=(1, 2, 4),   # 30B MoE (A3B); kv_heads=4 → TP|4
-        # See 4B spec above: deepseek_r1 reasoning parser separates the </think>
-        # block into reasoning_content; hermes parses the tool calls.
-        # NOTE: --enable-reasoning was removed in vLLM >=0.9; passing
-        # --reasoning-parser now enables reasoning implicitly.
-        extra_args=["--reasoning-parser", "deepseek_r1",
-                    "--enable-auto-tool-choice", "--tool-call-parser", "hermes"],
-        label="Qwen3-30B-A3B-Thinking-2507",
     ),
     "webweaver": ServerSpec(
         model="Alibaba-NLP/Tongyi-DeepResearch-30B-A3B",
@@ -242,20 +210,14 @@ _RERANKER_SERVER_SPECS: Dict[str, ServerSpec] = {
     ),
 }
 
-# --- Judge server (port 6009) — accuracy evaluation via Qwen3-32B -----------
-# Parameters aligned with the original AgentIR evaluation setup
-# (https://github.com/texttron/AgentIR/blob/main/evaluation/evaluate_bcp.py).
-JUDGE_SERVER_SPEC = ServerSpec(
-    model="Qwen/Qwen3-32B",
-    port=6009, tp_size=1,
-    max_model_len=16384, max_num_seqs=64,
-    gpu_memory_utilization=0.90,
-    model_gb=64.0, allowed_tp=(1, 2, 4),       # 32B fp16; 8 kv-heads → TP|8
-    label="Qwen3-32B (judge)",
-)
+# NOTE: The LLM-as-judge for accuracy/report evaluation is no longer run on
+# local GPUs.  It uses the OpenRouter-hosted ``openrouter/qwen/qwen3-32b`` model
+# (see ``evaluation.generation.short_answer`` / ``report``), so this manager no
+# longer launches a judge server.
 
-# Agents whose LLM connection is self-managed (they create their own OpenAI client)
-_SELF_MANAGED_AGENTS = frozenset({"oss", "tongyi", "glm", "qwen3", "cpm_explore", "cpm_report"})
+# Agents whose LLM connection is self-managed (they create their own OpenAI
+# client). Single source of truth lives in utils.config.
+from utils.config import SELF_MANAGED_LLM_AGENTS as _SELF_MANAGED_AGENTS
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -451,84 +413,6 @@ class VLLMServerManager:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
 
-    def start_judge_server(
-        self,
-        total_gpus: int,
-        *,
-        health_timeout: int = 900,
-    ) -> List[str]:
-        """Start one or more judge vLLM servers (Qwen3-32B).
-
-        Intended to be called **after** :meth:`shutdown` has freed the
-        query-processing server GPUs.  When the model fits on a single GPU,
-        launches one server per available GPU for maximum throughput.
-        Otherwise falls back to a single TP-sharded server.
-
-        Returns:
-            List of ``"http://localhost:<port>/v1"`` base URLs for each
-            judge server that was started.
-        """
-        spec = JUDGE_SERVER_SPEC
-        tp_size = self._compute_judge_tp_size(total_gpus, spec.gpu_memory_utilization)
-
-        num_servers = total_gpus // tp_size
-
-        import vllm as _vllm
-        print(f"\n{'=' * 70}")
-        print(f"[vLLM Manager] Starting {num_servers} judge server(s) — vLLM {_vllm.__version__}")
-        print(f"{'=' * 70}")
-        print(f"  Model   : {spec.model}")
-        print(f"  Servers : {num_servers}  (TP={tp_size} each)")
-        print(f"  Ports   : {spec.port}–{spec.port + num_servers - 1}")
-        print(f"{'=' * 70}\n")
-
-        self._force_gpu_cleanup()
-
-        base_urls: List[str] = []
-        for i in range(num_servers):
-            gpu_ids = list(range(i * tp_size, i * tp_size + tp_size))
-            port = spec.port + i
-            server_spec = ServerSpec(
-                model=spec.model,
-                port=port,
-                tp_size=tp_size,
-                max_model_len=spec.max_model_len,
-                max_num_seqs=spec.max_num_seqs,
-                gpu_memory_utilization=spec.gpu_memory_utilization,
-                label=f"{spec.label} [{i}]",
-            )
-            print(f"  Launching judge server {i}: port={port}, GPUs={gpu_ids}")
-            self._wait_for_gpu_release(
-                gpu_ids,
-                min_free_fraction=spec.gpu_memory_utilization - 0.05,
-                timeout=60,
-            )
-            self._launch_server(server_spec, gpu_ids)
-            base_urls.append(f"http://localhost:{port}/v1")
-
-        for i in range(num_servers):
-            port = spec.port + i
-            server_spec = ServerSpec(
-                model=spec.model, port=port, tp_size=tp_size,
-                max_model_len=spec.max_model_len, max_num_seqs=spec.max_num_seqs,
-                gpu_memory_utilization=spec.gpu_memory_utilization,
-                label=f"{spec.label} [{i}]",
-            )
-            self._wait_for_health(server_spec, timeout=health_timeout)
-
-        return base_urls
-
-    def shutdown_judge_server(self) -> None:
-        """Terminate all judge server processes."""
-        judge_ports = set(
-            range(JUDGE_SERVER_SPEC.port, JUDGE_SERVER_SPEC.port + 16)
-        )
-        judge_procs = [(s, p) for s, p in self._processes if s.port in judge_ports]
-        for spec, proc in judge_procs:
-            if proc.poll() is None:
-                self._kill_proc_tree(proc, spec.label)
-        self._processes = [(s, p) for s, p in self._processes if s.port not in judge_ports]
-
     # ── TP size selection ─────────────────────────────────────────────────
 
     # Headroom multiplier on top of raw weights to leave room for the KV cache,
@@ -592,25 +476,6 @@ class VLLMServerManager:
                   f"per-GPU {per_gpu_gb:.0f} GB (usable {usable:.0f}) → TP={fit}")
         return fit
 
-    def _compute_judge_tp_size(
-        self,
-        total_gpus: int,
-        gpu_memory_utilization: float,
-        model_gb: float = None,
-    ) -> int:
-        """Choose the smallest TP size that fits the judge model.
-
-        The judge runs after the query-processing servers are gone, so it may
-        use every GPU (``max_tp = total_gpus``).
-        """
-        per_gpu_gb = self._detect_per_gpu_gb()
-        if per_gpu_gb is None:
-            tp = min(4, total_gpus)
-            print(f"[vLLM Manager] Could not query GPU memory — "
-                  f"defaulting judge TP={tp}")
-            return tp
-        return self._fit_tp(JUDGE_SERVER_SPEC, per_gpu_gb, max_tp=total_gpus)
-
     # ── Resolve which servers are needed ────────────────────────────────────
 
     def _resolve_needed_servers(self, args) -> List[ServerSpec]:
@@ -665,13 +530,6 @@ class VLLMServerManager:
                     return _LLM_SERVER_SPECS[key]
                 # Default to oss:gpt-oss-20b if llm_model not recognized
                 return _LLM_SERVER_SPECS.get("oss:gpt-oss-20b")
-            # Qwen3-Thinking: model variant is determined by --llm-model
-            if agentic_model == "qwen3":
-                key = f"qwen3:{llm_model}"
-                if key in _LLM_SERVER_SPECS:
-                    return _LLM_SERVER_SPECS[key]
-                # Default to the 30B variant if llm_model not recognized
-                return _LLM_SERVER_SPECS.get("qwen3:Qwen/Qwen3-30B-A3B-Thinking-2507")
             # tongyi, glm
             if agentic_model in _LLM_SERVER_SPECS:
                 return _LLM_SERVER_SPECS[agentic_model]

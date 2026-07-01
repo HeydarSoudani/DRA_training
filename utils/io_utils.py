@@ -78,13 +78,13 @@ def get_processed_queries(run_dir: Union[str, Path]) -> set:
 
     Args:
         run_dir: Root directory of the current run.
-            Results are expected under ``{run_dir}/retrieval/*.trec``.
+            Results are expected under ``{run_dir}/retrieval/surfaced/*.trec``.
 
     Returns:
         Set of query-ID strings (filename stems of existing ``.trec`` files),
-        or an empty set if the retrieval directory does not exist.
+        or an empty set if the surfaced retrieval directory does not exist.
     """
-    retrieval_dir = Path(run_dir) / "retrieval"
+    retrieval_dir = Path(run_dir) / "retrieval" / "surfaced"
     if not retrieval_dir.exists():
         return set()
     try:
@@ -150,9 +150,9 @@ def load_result_from_saved_files(
     the trajectory JSON didn't already provide them.
 
     Args:
-        run_dir:  Root directory of the run.  Contains retrieval/,
-                  trajectory/, generation/, cited_docs_retrieval/
-                  subdirectories.
+        run_dir:  Root directory of the run.  Contains retrieval/
+                  (with surfaced/, seen/, cited/ subdirs), trajectory/,
+                  and generation/ subdirectories.
         query_id: Query identifier.
         lightweight: When True, skip the (potentially large) trajectory JSON
                      and reconstruct from TREC + generation + cited-docs files
@@ -170,42 +170,47 @@ def load_result_from_saved_files(
     def _read_text(subdir: str, filename: str) -> str:
         return Path(_file_path(subdir, filename)).read_text(encoding="utf-8")
 
-    def _read_bytes(subdir: str, filename: str) -> bytes:
-        return Path(_file_path(subdir, filename)).read_bytes()
-
     result: dict = {}
 
-    # ── 1. Try trajectory JSON (richest source) ─────────────────────────────
+    # ── 1. Try trajectory JSONL (richest source) ────────────────────────────
+    # Line 1 is a ``{"record": "meta", ...}`` header; each remaining line is one
+    # trajectory step.  The full surfaced ranking is not stored here (it lives in
+    # retrieval/surfaced/*.trec, reconstructed in step 5b); controller history is
+    # under controller/{qid}.json (step 6).
     if not lightweight:
         try:
-            content = _read_bytes("trajectory", f"{query_id}.json")
-            saved = _json_loads(content)
-            result = {
-                "trajectory":   saved.get("trajectory", []),
-                "generation":   saved.get("generation", ""),
-                "num_steps":    saved.get("num_steps", 0),
-                "num_searches": saved.get("num_searches", 0),
-            }
-            for key in ("citation_to_doc_id", "cited_docs_ranked_list",
-                        "memory_bank", "query_outputs", "token_usage",
-                        # Legacy key names: older runs still inline the controller
-                        # history in the trajectory file.  Newer runs persist it
-                        # only under controller/{qid}.json (loaded in step 6).
-                        "controller_score_history", "controller_unique_doc_ids",
-                        "controller_unique_doc_count",
-                        "tracker_score_history", "tracker_unique_doc_ids",
-                        "tracker_unique_doc_count"):
-                if key in saved and saved[key]:
-                    result[key] = saved[key]
+            content = _read_text("trajectory", f"{query_id}.jsonl")
+            meta: dict = {}
+            trajectory: list = []
+            for line in content.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                obj = _json_loads(line)
+                if obj.get("record") == "meta":
+                    meta = obj
+                else:
+                    trajectory.append(obj)
+            if meta or trajectory:
+                result = {
+                    "trajectory":     trajectory,
+                    "generation":     meta.get("generation", ""),
+                    "num_steps":      meta.get("num_steps", 0),
+                    "num_searches":   meta.get("num_searches", 0),
+                    "num_iterations": meta.get("num_iterations"),
+                }
+                for key in ("memory_bank", "query_outputs"):
+                    if meta.get(key):
+                        result[key] = meta[key]
         except (FileNotFoundError, OSError):
             pass
         except Exception as e:
-            print(f"Warning: could not load trajectory JSON for {query_id}: {e}")
+            print(f"Warning: could not load trajectory JSONL for {query_id}: {e}")
 
     # ── 2. Fall back to TREC if no trajectory loaded ─────────────────────────
     if not result:
         try:
-            trec_path = _file_path("retrieval", f"{query_id}.trec")
+            trec_path = _file_path("retrieval/surfaced", f"{query_id}.trec")
             result = load_result_from_trec(trec_path, query_id)
         except (FileNotFoundError, OSError):
             pass
@@ -223,7 +228,7 @@ def load_result_from_saved_files(
     # ── 4. Load cited docs from TREC if not already present ──────────────────
     if not result.get("cited_docs_ranked_list"):
         try:
-            content = _read_text("cited_docs_retrieval", f"{query_id}.trec")
+            content = _read_text("retrieval/cited", f"{query_id}.trec")
             doc_ids = []
             for line in content.splitlines():
                 parts = line.strip().split()
@@ -237,7 +242,7 @@ def load_result_from_saved_files(
     # ── 5. Load seen-doc iterations from TREC if not in trajectory ──────────
     if not result.get("seen_docs_iterations"):
         try:
-            seen_trec_path = _file_path("seen_docs_retrieval", f"{query_id}.trec")
+            seen_trec_path = _file_path("retrieval/seen", f"{query_id}.trec")
             seen_parsed = load_result_from_trec(seen_trec_path, query_id)
             if seen_parsed:
                 seen_iters = []
@@ -249,28 +254,54 @@ def load_result_from_saved_files(
         except Exception:
             pass
 
-    # ── 6. Load controller history from controller/{qid}.json if absent ──────
+    # ── 5b. Reconstruct surfaced iterations from surfaced TREC ───────────────
+    # The trajectory JSONL keeps only the seen (top-k) doc ids, not the full
+    # surfaced ranking.  Rebuild the per-step surfaced lists from the surfaced
+    # TREC so SurfacedDocEvaluator stays correct on resume.  (Fresh runs skip
+    # this: their in-memory trajectory still holds the full ``docs`` lists.)
+    has_surfaced = any(step.get("docs") for step in result.get("trajectory", []))
+    if not has_surfaced and not result.get("surfaced_docs_iterations"):
+        try:
+            surf_trec_path = _file_path("retrieval/surfaced", f"{query_id}.trec")
+            surf_parsed = load_result_from_trec(surf_trec_path, query_id)
+            surf_iters = [
+                step["docs"]
+                for step in surf_parsed.get("trajectory", [])
+                if step.get("docs")
+            ]
+            if surf_iters:
+                result["surfaced_docs_iterations"] = surf_iters
+        except (FileNotFoundError, OSError):
+            pass
+
+    # ── 6. Load controller history from controller/{qid}.jsonl if absent ─────
     # Newer runs persist the controller signal history only here (not inlined in
-    # the trajectory file).  Reconstruct the in-memory ``controller_score_history``
-    # list so ControllerEvaluator can aggregate it on resume.
+    # the trajectory file).  Line 1 is a ``{"record": "meta", ...}`` header; each
+    # remaining line is one iteration's signals.  Reconstruct the in-memory
+    # ``controller_score_history`` list so ControllerEvaluator can aggregate it
+    # on resume.
     if not result.get("controller_score_history") and not result.get("tracker_score_history"):
         try:
-            content = _read_text("controller", f"{query_id}.json")
-            cdata = _json_loads(content)
-            per_iteration = cdata.get("per_iteration", {})
+            content = _read_text("controller", f"{query_id}.jsonl")
             score_history = []
-            for key in sorted(per_iteration, key=lambda x: int(x)):
-                entry = dict(per_iteration[key])
-                entry.setdefault("iter_num", entry.get("iteration"))
-                score_history.append(entry)
+            unique_doc_count = 0
+            for line in content.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                obj = _json_loads(line)
+                if obj.get("record") == "meta":
+                    unique_doc_count = obj.get("unique_doc_count", 0)
+                    continue
+                obj.setdefault("iter_num", obj.get("iteration"))
+                score_history.append(obj)
             if score_history:
                 result["controller_score_history"] = score_history
-                result["controller_unique_doc_count"] = cdata.get("unique_doc_count", 0)
-                result["controller_unique_doc_ids"] = cdata.get("unique_doc_ids", [])
+                result["controller_unique_doc_count"] = unique_doc_count
         except (FileNotFoundError, OSError):
             pass
         except Exception as e:
-            print(f"Warning: could not load controller JSON for {query_id}: {e}")
+            print(f"Warning: could not load controller JSONL for {query_id}: {e}")
 
     return result
 
@@ -282,69 +313,80 @@ def load_result_from_saved_files(
 def build_run_name_for_pipeline(agentic_model: str, llm_model: str, **kwargs) -> str:
     """Build a consistent output directory name for the current pipeline run.
 
-    Template: {agent_name}_agent_{model}
-    Dataset/retriever/query_key info lives in the parent dataset_dir.
+    Template: {agent_name}_{backend}_{model}
+    e.g. ``glm_api_glm-4.7-flash`` or ``react_wo_plan_vllm_claude-sonnet-4-6``.
+    Dataset/retriever/query_key info lives in the parent dataset_dir; the
+    fixed searcher config lives in the run_config.json sidecar.
     """
+    from utils.config import resolve_agent_backend, model_display_name
+
     name = agentic_model
     if agentic_model == "react":
         name = "react_w_plan" if kwargs.get("use_plan", False) else "react_wo_plan"
-    return f"{name}_agent_{llm_model.replace('/', '--')}"
+    backend, _slug = resolve_agent_backend(agentic_model)
+    return f"{name}_{backend}_{model_display_name(llm_model)}"
 
 
-def build_searcher_config_name(**kwargs) -> str:
-    """Build an abbreviated searcher-config directory name.
+def build_controller_config_name(**kwargs) -> str:
+    """Build the controller-config directory name (the run's varying knob).
 
-    Encodes: seen_top_k, post_retrieval_reranker, post_fusion_reranker,
-    rerank_top_k, retrieval_input, post_fusion_reranker_input, controller.
+    Searcher/retrieval settings are fixed and recorded in run_config.json
+    rather than the path.  Only the controller is surfaced here.
 
-    Example: stk10_prr-null_pfr-bat_rrk100_ri-sq_pfri-oq_ctrl-mon
+    Examples: ``ctrl-off``, ``ctrl-monitor``,
+    ``ctrl-action_glm-4.7-flash_nov-cov-sim``.
     """
-    _reranker_alias = {
-        "null":              "null",
-        "batched_reranker":  "bat",
-        "rankllama":         "rll",
-        "rank1":             "rk1",
-        "qwen3_reranker":    "qw3",
-    }
-    _ri_alias = {
-        "subquery":                "sq",
-        "original_query+subquery": "oq+sq",
-        "reasoning+subquery":      "rs+sq",
-    }
-    _pfri_alias = {
-        "original_query":            "oq",
-        "original_query+subqueries": "oq+sqs",
-        "original_query+reasoning":  "oq+rs",
-        "reasoning+subqueries":      "rs+sqs",
-    }
-    _ctrl_alias = {
-        "off":            "off",
-        "monitor":        "mon",
-        "action":         "act",
-    }
+    from utils.config import model_display_name
 
-    seen_top_k = kwargs.get("seen_top_k", 10)
-    prr        = kwargs.get("post_retrieval_reranker_name", "null")
-    pfr        = kwargs.get("post_fusion_reranker_name", "null")
-    rrk        = kwargs.get("rerank_top_k", 100)
-    ri         = kwargs.get("retrieval_input", "subquery")
-    pfri       = kwargs.get("post_fusion_reranker_input", "original_query")
     controller_mode = kwargs.get("controller", "monitor")
-    controller_llm     = kwargs.get("llm_controller")
-
-    name = (
-        f"stk{seen_top_k}"
-        f"_prr-{_reranker_alias.get(prr, prr)}"
-        f"_pfr-{_reranker_alias.get(pfr, pfr)}"
-        f"_rrk{rrk}"
-        f"_ri-{_ri_alias.get(ri, ri)}"
-        f"_pfri-{_pfri_alias.get(pfri, pfri)}"
-        f"_ctrl-{_ctrl_alias.get(controller_mode, controller_mode)}"
-    )
+    name = f"ctrl-{controller_mode}"
     if controller_mode == "action":
-        _controller_label = controller_llm or kwargs.get("llm_intervene") or "default"
-        _controller_variant = kwargs.get("controller_prompt_variant", "nov_cov_sim")
-        name += f"_cllm-{_controller_label.replace('/', '--')}_cvar-{_controller_variant}"
+        controller_llm = kwargs.get("llm_controller") or kwargs.get("llm_intervene")
+        variant = kwargs.get("controller_prompt_variant", "nov_cov_sim")
+        name += f"_{model_display_name(controller_llm)}_{variant.replace('_', '-')}"
     if kwargs.get("ensure_novel_seen_docs", False):
         name += "_novel"
     return name
+
+
+def write_run_config(run_dir: Union[str, Path], agentic_model: str,
+                     llm_model: str, **kwargs) -> None:
+    """Persist the full run configuration to ``run_dir/run_config.json``.
+
+    Captures the fixed searcher/retrieval settings that used to live in the
+    folder name, plus agent/model/controller metadata, so nothing is lost when
+    the path is simplified.
+    """
+    from utils.config import resolve_agent_backend, model_display_name
+
+    backend, slug = resolve_agent_backend(agentic_model)
+    controller_mode = kwargs.get("controller", "monitor")
+    config = {
+        "agent": {
+            "agentic_model": agentic_model,
+            "backend": backend,
+            "openrouter_slug": slug,
+            "llm_model": llm_model,
+            "model_display": model_display_name(llm_model),
+            "use_plan": kwargs.get("use_plan", False),
+        },
+        "searcher": {
+            "retriever_name": kwargs.get("retriever_name", "e5"),
+            "seen_top_k": kwargs.get("seen_top_k", 10),
+            "rerank_top_k": kwargs.get("rerank_top_k", 100),
+            "post_retrieval_reranker_name": kwargs.get("post_retrieval_reranker_name", "null"),
+            "post_fusion_reranker_name": kwargs.get("post_fusion_reranker_name", "null"),
+            "retrieval_input": kwargs.get("retrieval_input", "subquery"),
+            "post_fusion_reranker_input": kwargs.get("post_fusion_reranker_input", "original_query"),
+            "ensure_novel_seen_docs": kwargs.get("ensure_novel_seen_docs", False),
+        },
+        "controller": {
+            "mode": controller_mode,
+            "llm_controller": kwargs.get("llm_controller") or kwargs.get("llm_intervene"),
+            "controller_prompt_variant": kwargs.get("controller_prompt_variant", "nov_cov_sim"),
+        },
+    }
+    path = Path(run_dir) / "run_config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        _json.dump(config, fh, indent=2)

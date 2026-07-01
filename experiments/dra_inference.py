@@ -13,16 +13,14 @@ Supported agents via --agentic-model (the LLM is selected automatically per agen
     glm             GLM reasoning agent                            → zai-org/GLM-4.7-Flash (vLLM)
     oss_20b         GPT-OSS-20B reasoning agent                    → gpt-oss-20b (vLLM)
     oss_120b        GPT-OSS-120B reasoning agent                   → gpt-oss-120b (vLLM)
-    qwen3_4b_thinking   Qwen3-Thinking reasoning agent             → Qwen/Qwen3-4B-Thinking-2507 (vLLM)
-    qwen3_30b_thinking  Qwen3-Thinking reasoning agent             → Qwen/Qwen3-30B-A3B-Thinking-2507 (vLLM)
     tongyi          Tongyi-DeepResearch ReAct agent                → Alibaba-NLP/Tongyi-DeepResearch-30B-A3B (vLLM)
     cpm_explore     AgentCPM-Explore deep search agent             → openbmb/AgentCPM-Explore (vLLM)
 
 Agentic workflows:
-    ReAct-style (react, selfask, searcho1, research, searchr1, stepsearch, drtulu, glm, oss_20b, oss_120b, qwen3_4b_thinking, qwen3_30b_thinking, tongyi, cpm_explore):
+    ReAct-style (react, selfask, searcho1, research, searchr1, stepsearch, drtulu, glm, oss_20b, oss_120b, tongyi, cpm_explore):
         Query → [Think → Search → Observe]* → Report → Evaluate
         Instruction-tuned : react, selfask, searcho1
-        RL-trained        : research, searchr1, stepsearch, drtulu, tongyi, cpm_explore, glm, oss_20b, oss_120b, qwen3_4b_thinking, qwen3_30b_thinking
+        RL-trained        : research, searchr1, stepsearch, drtulu, tongyi, cpm_explore, glm, oss_20b, oss_120b
 
     Outline-style (webweaver):
         Query → [Think → Search → Write_outline]* → Outline → [Think → Retrieve → Write_section]* → Report → Evaluate
@@ -31,22 +29,28 @@ Agentic workflows:
         Query → Search → Init Plan → [Search → Write]* → [Extend Plan → [Search → Write]*]* → Report → Evaluate
 
 Output structure:
-    run_outputs/{dataset}_{split}_{query_key}_{retriever}/{agent}_agent_{model}/{searcher_config}/
-    e.g. run_outputs/neuclir_2024_news_e5/oss_agent_gpt-oss-20b/stk10_prr-null_pfr-bat_rrk100_ri-sq_pfri-oq/
+    run_outputs/{dataset}_{split}_{query_key}_{retriever}/{agent}_{backend}_{model}/{controller_config}/
+    e.g. run_outputs/neuclir_2024_news_e5/oss_vllm_gpt-oss-20b/ctrl-off/
+    ├── run_config.json              full agent/searcher/controller settings
     ├── retrieval/
-    │   └── {query_id}.trec          per-query TREC file (all iterations, col 6 = iter_N)
+    │   ├── surfaced/
+    │   │   └── {query_id}.trec      per-query surfaced-doc TREC (all iters, col 6 = iter_N; raw retriever output)
+    │   ├── seen/
+    │   │   └── {query_id}.trec      per-query seen-doc TREC file (docs shown to the LLM)
+    │   ├── cited/
+    │   │   └── {query_id}.trec      per-query cited-doc TREC file (docs cited by the LLM)
+    │   └── fusion_{method}.trec     deduped fusion ranking, single aggregate over all queries
     ├── generation/
     │   └── {query_id}.md            per-query generation output
     ├── trajectory/
-    │   └── {query_id}.json          per-query trajectory: {qid, question, trajectory}
+    │   └── {query_id}.jsonl         per-query trajectory: meta line + one line per step
     ├── controller/
-    │   └── {query_id}.json          per-query controller signals: {qid, per_iteration: [...]}
-    ├── cited_docs_retrieval/
-    │   └── {query_id}.trec          per-query cited-doc TREC file (docs cited by the LLM)
-    ├── seen_docs_retrieval/
-    │   └── {query_id}.trec          per-query seen-doc TREC file (docs shown to the LLM)
-    ├── ranking_results.trec
-    └── summary.json                 includes "cited_doc_retrieval" section when available
+    │   └── {query_id}.jsonl         per-query controller signals: meta line + one line per iteration
+    └── summary.json                 grouped run metrics (mirrors the dir layout):
+                                       num_queries,
+                                       answer     {accuracy, report},
+                                       retrieval  {fusion, seen, cited},
+                                       trajectory, generation, controller
 """
 
 import argparse
@@ -96,7 +100,8 @@ from utils.io_utils import (
     get_processed_queries,
     setup_output_dirs,
     build_run_name_for_pipeline,
-    build_searcher_config_name,
+    build_controller_config_name,
+    write_run_config,
 )
 from evaluation.runner import evaluate_and_save, build_evaluators, load_processed_results
 from evaluation.retrieval.fusion import run_fusion_eval
@@ -178,9 +183,9 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
         retriever_label = kwargs.get("retriever_name", "e5")
         qk_part = f"_{query_key}" if query_key and query_key != "text" else ""
         dataset_dir = f"{dataset}_{file_data_set}{qk_part}_{retriever_label}"
-        searcher_config_name = build_searcher_config_name(**kwargs)
+        controller_config_name = build_controller_config_name(**kwargs)
 
-        run_dir = str(Path(output_path) / dataset_dir / run_name / searcher_config_name)
+        run_dir = str(Path(output_path) / dataset_dir / run_name / controller_config_name)
 
         print(f"\n{'=' * 80}")
         print(f"[OUTPUT] Loading/saving results from: {run_dir}")
@@ -212,7 +217,7 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
             print(f"--eval-only: run_dir does not exist: {run_dir}")
             return
 
-        _retrieval_prefix = f"{_run_dir_str.rstrip('/')}/retrieval"
+        _retrieval_prefix = f"{_run_dir_str.rstrip('/')}/retrieval/surfaced"
         processed_all = get_processed_queries(run_dir)
         if not processed_all:
             print(f"No retrieval data found in {_retrieval_prefix}. "
@@ -229,33 +234,21 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
         retrieval_evaluator, generation_evaluator, trajectory_evaluator, \
             cited_doc_evaluator, seen_doc_evaluator, accuracy_evaluator, report_evaluator, \
             controller_evaluator = \
-            build_evaluators(qrels, kwargs, answers=answers, questions=all_questions)
+            build_evaluators(qrels, kwargs, answers=answers, questions=all_questions, dataset=dataset)
 
-        _vllm_mgr = kwargs.get("vllm_manager")
-        _total_gpus = kwargs.get("total_gpus_on_machine", 8)
-        _judge_api_url = kwargs.get("judge_api_url")
-        _judge_started = False
-        _needs_judge = accuracy_evaluator is not None or report_evaluator is not None
-        if _needs_judge and _judge_api_url is None and _vllm_mgr is not None:
-            judge_urls = _vllm_mgr.start_judge_server(_total_gpus)
-            for _je in (accuracy_evaluator, report_evaluator):
-                if _je is not None:
-                    _je.judge_api_bases = judge_urls
-                    _je._clients = []  # reset so clients are re-created
-            _judge_started = True
+        # Fusion runs first so its per-method surfaced-doc metrics can be folded
+        # into the single summary.json written by evaluate_and_save.
+        fusion_metrics = run_fusion_eval(results, qrels, kwargs, run_dir, num_gpus)
 
-        try:
-            evaluate_and_save(
-                results, generation_evaluator, trajectory_evaluator, run_dir,
-                cited_doc_evaluator, seen_doc_evaluator, accuracy_evaluator,
-                controller_evaluator=controller_evaluator,
-                report_evaluator=report_evaluator,
-            )
-        finally:
-            if _judge_started:
-                _vllm_mgr.shutdown_judge_server()
-
-        run_fusion_eval(results, qrels, kwargs, run_dir, num_gpus)
+        # The LLM-as-judge evaluators (BrowseComp-Plus accuracy, report rubric)
+        # call the OpenRouter-hosted judge directly — no local server to start.
+        evaluate_and_save(
+            results, generation_evaluator, trajectory_evaluator, run_dir,
+            cited_doc_evaluator, seen_doc_evaluator, accuracy_evaluator,
+            controller_evaluator=controller_evaluator,
+            report_evaluator=report_evaluator,
+            fusion_metrics=fusion_metrics,
+        )
         return
 
     # ==================== Inject qrels into worker_config for multi-GPU controller ==
@@ -336,17 +329,18 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
             agent.controller = controller
 
     # ==================== Setup output dirs + evaluators ====================
-    retrieval_evaluator, generation_evaluator, trajectory_evaluator, cited_doc_evaluator, seen_doc_evaluator, accuracy_evaluator, report_evaluator, controller_evaluator = build_evaluators(qrels, kwargs, answers=answers, questions=all_questions)
+    retrieval_evaluator, generation_evaluator, trajectory_evaluator, cited_doc_evaluator, seen_doc_evaluator, accuracy_evaluator, report_evaluator, controller_evaluator = build_evaluators(qrels, kwargs, answers=answers, questions=all_questions, dataset=dataset)
 
     retrieval_dir = generation_dir = trajectory_dir = cited_doc_dir = seen_doc_dir = controller_dir = None
     if output_path:
-        _dirs = setup_output_dirs(run_dir, ["retrieval", "generation", "trajectory", "cited_docs_retrieval", "seen_docs_retrieval", "controller"])
-        retrieval_dir  = _dirs["retrieval"]
+        _dirs = setup_output_dirs(run_dir, ["retrieval/surfaced", "generation", "trajectory", "retrieval/cited", "retrieval/seen", "controller"])
+        retrieval_dir  = _dirs["retrieval/surfaced"]
         generation_dir = _dirs["generation"]
         trajectory_dir = _dirs["trajectory"]
-        cited_doc_dir  = _dirs["cited_docs_retrieval"]
-        seen_doc_dir   = _dirs["seen_docs_retrieval"]
+        cited_doc_dir  = _dirs["retrieval/cited"]
+        seen_doc_dir   = _dirs["retrieval/seen"]
         controller_dir = _dirs["controller"]
+        write_run_config(run_dir, agentic_model=agentic_model, llm_model=llm_model, **kwargs)
         print(f"\nProcessing {len(queries)} queries, saving results to {run_dir}/...")
 
     # ==================== Loop: run + save per query ====================
@@ -486,7 +480,6 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
     # ==================== Evaluate + Save ====================
     _vllm_mgr = kwargs.get("vllm_manager")
     _total_gpus = kwargs.get("total_gpus_on_machine", 8)
-    _judge_api_url = kwargs.get("judge_api_url")
 
     # ── Aggressively release ALL GPU memory ──────────────────────────
     # Break every reference chain to GPU-resident objects so gc can
@@ -541,37 +534,27 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
     if _vllm_mgr is not None:
         _vllm_mgr.shutdown_and_release_gpus(_total_gpus)
 
-    # Start the vLLM judge server(s) for accuracy evaluation (Qwen3-32B).
-    # Skipped when --judge-api-url points to an externally-managed server.
-    _judge_started = False
-    _needs_judge = accuracy_evaluator is not None or report_evaluator is not None
-    if _needs_judge and _judge_api_url is None and _vllm_mgr is not None:
-        judge_urls = _vllm_mgr.start_judge_server(_total_gpus)
-        for _je in (accuracy_evaluator, report_evaluator):
-            if _je is not None:
-                _je.judge_api_bases = judge_urls
-                _je._clients = []  # reset so clients are re-created
-        _judge_started = True
-
-    try:
-        evaluate_and_save(
-            results,
-            generation_evaluator,
-            trajectory_evaluator,
-            run_dir,
-            cited_doc_evaluator,
-            seen_doc_evaluator,
-            accuracy_evaluator,
-            controller_evaluator=controller_evaluator,
-            report_evaluator=report_evaluator,
-        )
-    finally:
-        if _judge_started:
-            _vllm_mgr.shutdown_judge_server()
-
     # ==================== Multi-fusion evaluation ====================
+    # Fusion runs first so its per-method surfaced-doc metrics can be folded
+    # into the single summary.json written by evaluate_and_save.
+    fusion_metrics = {}
     if results:
-        run_fusion_eval(results, qrels, kwargs, run_dir, num_gpus)
+        fusion_metrics = run_fusion_eval(results, qrels, kwargs, run_dir, num_gpus)
+
+    # The LLM-as-judge evaluators (BrowseComp-Plus accuracy, report rubric)
+    # call the OpenRouter-hosted judge directly — no local server to start.
+    evaluate_and_save(
+        results,
+        generation_evaluator,
+        trajectory_evaluator,
+        run_dir,
+        cited_doc_evaluator,
+        seen_doc_evaluator,
+        accuracy_evaluator,
+        controller_evaluator=controller_evaluator,
+        report_evaluator=report_evaluator,
+        fusion_metrics=fusion_metrics,
+    )
 
     # ==================== Final status ==========================================
     if output_path and run_dir:
@@ -601,7 +584,7 @@ def _parse_args():
     parser.add_argument("--config", type=str, default=_CONFIG_DEFAULT, help="Path to the YAML file holding the mostly-fixed pipeline variables. Any value in it can be overridden by passing the matching --flag on the CLI.")
 
     # ── Frequently-varied knobs (everything else lives in --config) ─────────
-    parser.add_argument("--agentic-model", type=str, default="qwen3_4b_thinking", choices=list(AGENTIC_MODEL_TO_LLM), help="Agent to run; the LLM is selected automatically from the agent. cpm_report = Writing-as-Reasoning (report generation); searchr1/research/stepsearch/react/selfask/searcho1 = Reasoning-augmented retrieval; glm/oss_20b/oss_120b/qwen3_4b_thinking/qwen3_30b_thinking/tongyi = vendor-specific ReAct agents.")
+    parser.add_argument("--agentic-model", type=str, default="glm", choices=list(AGENTIC_MODEL_TO_LLM), help="Agent to run; the LLM is selected automatically from the agent. cpm_report = Writing-as-Reasoning (report generation); searchr1/research/stepsearch/react/selfask/searcho1 = Reasoning-augmented retrieval; glm/oss_20b/oss_120b/tongyi = vendor-specific ReAct agents.")
     parser.add_argument("--dataset", type=str, default="trqa", choices=["trqa", "browsecomp_plus", "neuclir"], help="Dataset. trqa/neuclir/browsecomp_plus use local indices.")
     parser.add_argument("--retriever", type=str, default="qwen3_emb_4b", choices=["bm25", "spladepp", "spladev3", "rerank_l6", "rerank_l12", "contriever", "dpr", "e5", "bge", "qwen3_emb_0.6b", "qwen3_emb_4b", "qwen3_emb_8b", "agentir_4b"], help="Retriever type for public datasets (neuclir only)")
     parser.add_argument("--controller", type=str, default="off", choices=["off", "monitor", "action"], help="Controller mode. 'off': disabled. 'monitor': compute and log scores only, no intervention. 'action': controller takes corrective actions (intervene/stop) via the controller policy.")
@@ -610,7 +593,7 @@ def _parse_args():
     # ── Run-control flags ───────────────────────────────────────────────────
     parser.add_argument("--limit", type=int, default=None, help="Cap number of queries (for quick tests)")
     parser.add_argument("--num-gpus", type=int, default=1, help="Number of GPU workers for query-level parallelism. 0 = auto-detect from torch.cuda.device_count(). Each worker loads its own model instance on its assigned GPU.")
-    parser.add_argument("--eval-only", type=_sm_bool, nargs="?", const=True, default=False, help="Skip agent execution and run only evaluation on already-generated results. Runs all evaluators (generation, trajectory, controller, cited-doc, seen-doc, accuracy, fusion). Requires the run to have been completed at least once so that trajectory/ and retrieval/ files exist. When --judge-api-url is set, also runs accuracy evaluation.")
+    parser.add_argument("--eval-only", type=_sm_bool, nargs="?", const=True, default=False, help="Skip agent execution and run only evaluation on already-generated results. Runs all evaluators (generation, trajectory, controller, cited-doc, seen-doc, accuracy, fusion). Requires the run to have been completed at least once so that trajectory/ and retrieval/ files exist. Accuracy evaluation runs automatically whenever the dataset has ground-truth answers (LLM-as-judge via --judge-model for BrowseComp-Plus; rule-based numeric match for TRQA).")
     parser.add_argument("--quiet", type=_sm_bool, nargs="?", const=True, default=False, help="Print minimal logs (overrides verbose)")
 
     args, extras = parser.parse_known_args()
@@ -699,8 +682,8 @@ def main():
               f"local vLLM (reserves leftmost GPUs)")
 
     if args.eval_only:
-        # Eval-only: skip LLM/reranker vLLM servers — only the judge server
-        # (managed inside run_pipeline) may be needed.
+        # Eval-only: skip LLM/reranker vLLM servers.  The LLM-as-judge
+        # evaluators use the OpenRouter-hosted judge, so no GPU is needed for it.
         if num_gpus > 1:
             gpu_ids = gpu_ids or list(range(min(num_gpus, total_gpus_on_machine)))
     elif gpu_ids is None:
@@ -742,7 +725,6 @@ def main():
         pipeline_kwargs = assemble_pipeline_kwargs(args, llm_client, retriever, num_gpus, verbose, gpu_ids=gpu_ids)
 
     # ── Deep-research-pipeline-specific kwargs ────────────────────────
-    _judge_url = args.judge_api_url
     pipeline_kwargs.update({
         "fusion_k": args.fusion_k,
         "fusion_methods": args.fusion_methods,
@@ -750,7 +732,7 @@ def main():
         "report_eval": args.report_eval,
         "vllm_manager": vllm_manager,
         "total_gpus_on_machine": total_gpus_on_machine,
-        "judge_api_url": _judge_url,
+        "judge_model": args.judge_model,
     })
 
     # ── Optional post-retrieval & post-fusion rerankers ─────────────────
@@ -804,22 +786,26 @@ if __name__ == "__main__":
 # ============================================================================
 # OUTPUT STRUCTURE
 # ============================================================================
-#   run_outputs/{dataset}_{split}_{query_key}_{retriever}/{agent}_agent_{model}/{searcher_config}/
-#   e.g. run_outputs/neuclir_2024_news_e5/oss_agent_gpt-oss-20b/stk10_prr-null_pfr-bat_rrk100_ri-sq_pfri-oq/
+#   run_outputs/{dataset}_{split}_{query_key}_{retriever}/{agent}_{backend}_{model}/{controller_config}/
+#   e.g. run_outputs/neuclir_2024_news_e5/oss_vllm_gpt-oss-20b/ctrl-off/
+#     ├── run_config.json          full agent/searcher/controller settings
 #     ├── retrieval/
-#     │   └── {query_id}.trec   per-query TREC file (all iterations, col 6 = iter_N)
+#     │   ├── surfaced/
+#     │   │   └── {query_id}.trec   per-query surfaced-doc TREC (raw retriever output, col 6 = iter_N)
+#     │   ├── seen/
+#     │   │   └── {query_id}.trec   per-query seen-doc TREC file (docs shown to the LLM)
+#     │   ├── cited/
+#     │   │   └── {query_id}.trec   per-query cited-doc TREC file (docs cited by the LLM)
+#     │   └── fusion_{method}.trec  deduped fusion ranking, single aggregate over all queries
 #     ├── generation/
 #     │   └── {query_id}.md     per-query generation output
 #     ├── trajectory/
-#     │   └── {query_id}.json   per-query trajectory: {qid, question, trajectory}
+#     │   └── {query_id}.jsonl  per-query trajectory: meta line + one line per step
 #     ├── controller/
-#     │   └── {query_id}.json   per-query controller signals: {qid, per_iteration: [...]}
-#     ├── cited_docs_retrieval/
-#     │   └── {query_id}.trec   per-query cited-doc TREC file (docs cited by the LLM)
-#     ├── seen_docs_retrieval/
-#     │   └── {query_id}.trec   per-query seen-doc TREC file (docs shown to the LLM)
-#     ├── ranking_results.trec
-#     └── summary.json
+#     │   └── {query_id}.jsonl  per-query controller signals: meta line + one line per iteration
+#     └── summary.json          grouped: num_queries, answer{accuracy,report},
+#                                        retrieval{fusion,seen,cited},
+#                                        trajectory, generation, controller
 #
 # ============================================================================
 # EXAMPLE USAGE

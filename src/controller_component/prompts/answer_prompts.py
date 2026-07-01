@@ -186,7 +186,14 @@ def extract_answer_candidates(
         thinking = think_m.group(1).strip()
 
     if not thinking:
-        expl_m = re.search(r"Explanation:\s*(.+?)(?=\n(?:Exact Answer|Confidence):|$)", raw, re.DOTALL)
+        # Matches both the OSS/GLM colon form ("Explanation: …") and the
+        # markdown-header form ("## Explanation with Citations\n…"),
+        # stopping at the next header / Exact Answer / Confidence section.
+        expl_m = re.search(
+            r"#{0,3}\s*Explanation(?:\s+with\s+Citations)?\s*:?[ \t]*\n*(.+?)"
+            r"(?=\n[ \t]*#{1,3}\s*Exact Answer|\n[ \t]*(?:Exact Answer|Confidence):|$)",
+            raw, re.DOTALL,
+        )
         if expl_m:
             _expl = expl_m.group(1).strip()
             if not re.search(r"\{your\b", _expl, re.IGNORECASE):
@@ -233,7 +240,14 @@ def extract_answer_candidates(
         return False
 
     def _try_exact_answer() -> bool:
-        m = re.search(r"Exact Answer:\s*(.+?)(?:\n|$)", raw)
+        # Handles the OSS/GLM colon form ("Exact Answer: …") and the
+        # markdown-header form ("## Exact Answer\n…"), stopping at a
+        # following header, a Confidence line, a blank line, or end of text.
+        m = re.search(
+            r"#{0,3}\s*Exact Answer\s*:?[ \t]*\n*[ \t]*(.+?)"
+            r"(?:\n[ \t]*#{1,3}|\n[ \t]*Confidence:|\n[ \t]*\n|$)",
+            raw, re.DOTALL,
+        )
         if m:
             val = re.sub(r"\s*Confidence:\s*\d+(?:\.\d+)?\s*%\s*$", "", m.group(1).strip())
             _add_raw(val)

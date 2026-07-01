@@ -1497,45 +1497,16 @@ class CPMReport(BasicAgent):
         if citation_to_doc_id:
             lines.append(f"This report cites {len(unique_citations)} documents:\n\n")
 
-            # Get all retrieved docs to find titles and contexts
-            retrieved_docs_cache = {}  # Cache docs by doc_id
-
-            # Build cache from retrieved_docs_per_search (each entry is a flat fused list)
-            for search_docs in state.get("retrieved_docs_per_search", []):
-                for doc in search_docs:
-                    if isinstance(doc, dict):
-                        doc_id = doc.get("id") or doc.get("doc_id")
-                        if doc_id:
-                            retrieved_docs_cache[doc_id] = doc
-
             # Generate citation entries
             for citation_id in unique_citations:
                 # Get doc_id from mapping (check both int and string keys)
                 doc_id = citation_to_doc_id.get(citation_id) or citation_to_doc_id.get(str(citation_id))
 
-                if doc_id and doc_id in retrieved_docs_cache:
-                    doc = retrieved_docs_cache[doc_id]
-                    # Try to get title from multiple possible locations
-                    # For local retrievers: doc["title"]
-                    # For API endpoint: doc["metadata"]["title"]
-                    title = doc.get("title") or (doc.get("metadata", {}).get("title") if isinstance(doc.get("metadata"), dict) else None) or "N/A"
-                    # Get context from contents or text field
-                    context = doc.get("contents") or doc.get("text") or doc.get("relevant_text") or "N/A"
-
-                    # Truncate context if too long
-                    if isinstance(context, str) and len(context) > 300:
-                        context = context[:300] + "..."
-
-                    lines.append(f"[{citation_id}] **{title}**\n")
-                    lines.append(f"    {context}\n")
-                    lines.append(f"    *Document ID: `{doc_id}`*\n\n")
-                elif doc_id:
-                    # Have doc_id but not in cache
-                    lines.append(f"[{citation_id}] *Document ID: `{doc_id}`*\n")
-                    lines.append(f"    *(Full details not available in retrieval cache)*\n\n")
+                if doc_id:
+                    lines.append(f"[{citation_id}] {doc_id}\n")
                 else:
                     # No doc_id mapping
-                    lines.append(f"[{citation_id}] *(Citation mapping not available)*\n\n")
+                    lines.append(f"[{citation_id}] *(Citation mapping not available)*\n")
         else:
             # No citation_to_doc_id mapping
             lines.append(f"This report cites {len(unique_citations)} documents, but full citation details ")

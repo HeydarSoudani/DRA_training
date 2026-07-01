@@ -1,12 +1,12 @@
 """Fusion evaluation: run every fusion method, score it, and persist results.
 
 Builds a fused ranking per method (via :mod:`.builders`), scores it with the
-TREC metric functions, writes ``ranking_results_{method}.trec`` files, and
-updates ``summary.json``.  CPU methods run sequentially; GPU diversity methods
-run one-process-per-GPU.
+TREC metric functions, and writes ``retrieval/fusion_{method}.trec`` files.
+The metrics are returned to the caller (``evaluate_and_save`` folds them into
+``summary.json`` under ``retrieval.fusion``).  CPU methods run sequentially;
+GPU diversity methods run one-process-per-GPU.
 """
 
-import json
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -62,7 +62,7 @@ def _evaluate_one_fusion_worker(method: str, results: Dict[str, Any], qrels: Dic
 
         trec_path = None
         if run_dir_str:
-            trec_path = f"{run_dir_str.rstrip('/')}/ranking_results_{method}.trec"
+            trec_path = f"{run_dir_str.rstrip('/')}/retrieval/fusion_{method}.trec"
             save_ranking_results(ranking_results, trec_path, format_type="trec")
 
         return {"method": method, "metrics": metrics, "trec_path": trec_path, "error": None, "skipped": False}
@@ -106,7 +106,7 @@ def evaluate_all_fusions_and_save(results: Dict[str, Any], qrels: Dict[str, Dict
 
     For each method in *fusion_methods* this function:
     1. Builds a ranking by fusing per-section ``final_ranked_list`` arrays.
-    2. Saves ``ranking_results_{method}.trec`` under *run_dir*.
+    2. Saves ``retrieval/fusion_{method}.trec`` under *run_dir*.
     3. Computes recall/NDCG/… metrics at *k_values*.
 
     CPU methods run sequentially, each showing a per-query ``tqdm`` bar.
@@ -207,7 +207,7 @@ def evaluate_all_fusions_and_save(results: Dict[str, Any], qrels: Dict[str, Dict
 
             trec_path = None
             if run_dir_str:
-                trec_path = f"{run_dir_str.rstrip('/')}/ranking_results_{method}.trec"
+                trec_path = f"{run_dir_str.rstrip('/')}/retrieval/fusion_{method}.trec"
                 save_ranking_results(ranking_results, trec_path, format_type="trec")
 
             recall_at_100 = metrics.get("Recall", {}).get("Recall@100", None)
@@ -292,11 +292,13 @@ def run_fusion_eval(
     run_dir: Optional[Path],
     num_gpus: int,
 ) -> Dict[str, Any]:
-    """Evaluate all aggregation fusion methods and update summary.json.
+    """Evaluate all aggregation fusion methods and return their metrics.
 
     Thin wrapper around :func:`evaluate_all_fusions_and_save` that extracts
-    the relevant parameters from *kwargs*, prints a summary header, and
-    persists the resulting metrics into ``{run_dir}/summary.json``.
+    the relevant parameters from *kwargs* and prints a summary header.  The
+    per-method ``fusion_{method}.trec`` files are written under *run_dir*;
+    the returned metrics are folded into ``summary.json`` by the caller
+    (``evaluate_and_save``, under ``retrieval.fusion``).
 
     Args:
         results:    Unified results dict keyed by query_id.
@@ -304,7 +306,7 @@ def run_fusion_eval(
         kwargs:     Pipeline kwargs dict (read: k_values, aggregation_rrf_k,
                     aggregation_interleaving_window, fusion_k, fusion_methods,
                     encoder).
-        run_dir:    Output directory for TREC files and summary.json.
+        run_dir:    Output directory for the fusion TREC files.
         num_gpus:   Number of GPU workers for diversity fusion methods.
 
     Returns:
@@ -337,11 +339,8 @@ def run_fusion_eval(
         reranker=kwargs.get("reranker", None),
         rerank_top_k=kwargs.get("rerank_top_k", 100),
     )
-    if fusion_metrics and run_dir:
-        summary_path = Path(str(run_dir)) / "summary.json"
-        summary = json.load(open(summary_path)) if summary_path.exists() else {}
-        summary["retrieval"] = fusion_metrics
-        with open(summary_path, "w") as f:
-            json.dump(summary, f, indent=2)
-        print(f"  ✓ Updated summary with fusion metrics: {summary_path}")
+    # Fusion TREC files are written by ``evaluate_all_fusions_and_save`` above.
+    # The metrics themselves are folded into summary.json by
+    # ``evaluate_and_save`` (under ``retrieval.fusion``) so the file is written
+    # exactly once — this function only computes and returns them.
     return fusion_metrics or {}

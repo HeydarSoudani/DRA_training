@@ -10,8 +10,10 @@
 # Requirements:
 #   - vLLM installed with gpt-oss support.
 #   - GPU(s): both variants are mxfp4-quantized MoE.  20b (~13 GB) fits on a
-#     single GPU; 120b (~63 GB) fits on 1× 94 GB H100, TP=2 on 40 GB A100.
-#     TP is auto-sized from detected GPU memory.
+#     single GPU; 120b (~63 GB) fits on a single 80+ GB H100 (TP=1 on the
+#     180 GB card here), TP=2 only on 40 GB A100s.  TP is auto-sized from
+#     detected GPU memory, keeping 120b on one GPU so the rest stay free for
+#     retrieval workers.
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../_common.sh"
@@ -56,4 +58,4 @@ exec vllm serve "$MODEL" \
     --max-model-len 131072 \
     --max-num-seqs 16 \
     --gpu-memory-utilization 0.90 \
-    --enforce-eager
+    --enable-prefix-caching

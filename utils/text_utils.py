@@ -472,7 +472,7 @@ def format_as_snippets(
     return "\n".join(parts), ids
 
 
-def build_references_section(result: dict, max_context_length: int = 300) -> str:
+def build_references_section(result: dict) -> str:
     """Build a formatted References section from an agent result's trajectory.
 
     Skips if the generation already contains a ``## References`` section.
@@ -510,15 +510,7 @@ def build_references_section(result: dict, max_context_length: int = 300) -> str
 
     for idx, doc in enumerate(cited_docs, 1):
         did = _doc_id(doc)
-        title = _doc_title(doc)
-        text = _doc_text(doc, max_length=max_context_length)
-
-        lines.append(f"[{idx}] {title}")
-        if text:
-            lines.append(f"    {text}")
-        if did:
-            lines.append(f"    Document ID: {did}")
-        lines.append("")
+        lines.append(f"[{idx}] {did}")
 
     return "\n".join(lines)
 

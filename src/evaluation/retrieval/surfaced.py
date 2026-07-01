@@ -85,6 +85,15 @@ class SurfacedDocEvaluator(BaseDocRetrievalEvaluator):
         iterations = _extract_trajectory_iterations(
             result.get("trajectory", []), eval_top_k=self.eval_top_k,
         )
+        # On resume the trajectory JSONL keeps only seen (top-k) doc ids, so the
+        # full surfaced ranking is reconstructed from surfaced/{qid}.trec into
+        # ``surfaced_docs_iterations`` (see utils.io_utils).
+        if not iterations:
+            surfaced_iters = result.get("surfaced_docs_iterations", [])
+            if surfaced_iters:
+                if self.eval_top_k is not None:
+                    surfaced_iters = [it[: self.eval_top_k] for it in surfaced_iters]
+                iterations = surfaced_iters
         # Fall back to final_ranked_list (e.g. outline reduction stores no "docs"
         # in its trajectory steps but always populates final_ranked_list).
         if not iterations:

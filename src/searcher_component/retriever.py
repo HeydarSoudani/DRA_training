@@ -13,6 +13,15 @@ import json
 import faiss
 import torch
 import warnings
+
+# Disable PyTorch's cuDNN scaled-dot-product-attention backend.
+# On torch 2.6+cu124 with cuDNN 9.1, the cuDNN SDPA kernel
+# (at::native::run_cudnn_SDP_fprop) either fails to build an execution plan
+# ("No valid execution plans built") or segfaults outright during the
+# Qwen3-Embedding forward pass. Disabling it forces PyTorch to fall back to
+# the flash / memory-efficient / math attention kernels, which work correctly.
+if hasattr(torch.backends.cuda, "enable_cudnn_sdp"):
+    torch.backends.cuda.enable_cudnn_sdp(False)
 import datasets
 import numpy as np
 from tqdm import tqdm
@@ -88,12 +97,12 @@ def load_model(retriever, model_path: str, use_fp16: bool = False, device=None):
     if retriever == 'dpr':
         tokenizer = DPRQuestionEncoderTokenizerFast.from_pretrained(model_path)
         model = DPRQuestionEncoder.from_pretrained(
-            model_path, torch_dtype=torch_dtype, device_map=device_map
+            model_path, dtype=torch_dtype, device_map=device_map
         )
     else:
         tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True, trust_remote_code=True)
         model = AutoModel.from_pretrained(
-            model_path, trust_remote_code=True, torch_dtype=torch_dtype, device_map=device_map
+            model_path, trust_remote_code=True, dtype=torch_dtype, device_map=device_map
         )
 
     # Qwen3 embedding models and AgentIR require left padding for last-token pooling

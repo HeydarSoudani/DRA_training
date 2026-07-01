@@ -9,9 +9,10 @@ Instead this evaluator scores two complementary aspects:
    actually relevant (precision) and how many relevant documents were cited
    (recall).  This reuses :func:`evaluation.retrieval.citation_metrics.compute_citation_metrics`.
 
-The judge plumbing (LiteLLM client, multi-endpoint round-robin, concurrency)
-mirrors :class:`evaluation.generation.short_answer.AccuracyEvaluator` so the same
-vLLM judge server wiring in the pipeline applies unchanged.
+The judge plumbing (LiteLLM client, concurrency) mirrors
+:class:`evaluation.generation.short_answer.AccuracyEvaluator`: the judge is the
+OpenRouter-hosted ``openrouter/qwen/qwen3-32b`` model (requires
+``OPENROUTER_API_KEY``).
 """
 
 import concurrent.futures
@@ -23,7 +24,9 @@ from typing import Any, Dict, List, Optional
 
 from tqdm import tqdm
 
+from reasoner_component.api import get_litellm_client
 from utils.llm_client import LiteLLMClient
+from .short_answer import DEFAULT_JUDGE_MODEL
 from ..retrieval.citation_metrics import compute_citation_metrics, resolve_cited_doc_ids
 
 logger = logging.getLogger(__name__)
@@ -85,7 +88,7 @@ class ReportEvaluator:
 
         evaluator = ReportEvaluator(
             questions={"q1": "..."}, qrels=qrels,
-            judge_api_base="http://localhost:6009/v1",
+            judge_model="openrouter/qwen/qwen3-32b",
         )
         metrics = evaluator.evaluate(results)
         evaluator.print_results(metrics)
@@ -95,9 +98,7 @@ class ReportEvaluator:
         self,
         questions: Optional[Dict[str, str]] = None,
         qrels: Optional[Dict[str, Dict[str, int]]] = None,
-        judge_model: str = "openai/Qwen/Qwen3-32B",
-        judge_api_base: str = "http://localhost:6009/v1",
-        judge_api_bases: Optional[List[str]] = None,
+        judge_model: str = DEFAULT_JUDGE_MODEL,
         max_concurrent_judges: int = 64,
     ) -> None:
         """Initialise the evaluator.
@@ -107,31 +108,28 @@ class ReportEvaluator:
             qrels:          Ground-truth relevance judgements, used for the
                             citation-faithfulness metrics.  When None, only the
                             rubric scores are produced.
-            judge_model:    LiteLLM model identifier for the judge.
-            judge_api_base: OpenAI-compatible API base for a single judge server.
-            judge_api_bases: Optional list of judge servers (round-robin).
-            max_concurrent_judges: Max in-flight judge requests per server.
+            judge_model:    Model identifier for the judge, resolved by
+                            ``reasoner_component.api`` (default:
+                            ``openrouter/qwen/qwen3-32b`` via OpenRouter,
+                            requires ``OPENROUTER_API_KEY``).
+            max_concurrent_judges: Max in-flight judge requests.
         """
         self.questions = questions or {}
         self.qrels = qrels or {}
         self.judge_model = judge_model
-        self.judge_api_bases: List[str] = judge_api_bases if judge_api_bases else [judge_api_base]
         self.max_concurrent_judges = max_concurrent_judges
         self._clients: List[LiteLLMClient] = []
 
     def _get_clients(self) -> List[LiteLLMClient]:
-        """Lazily initialise one LLM client per judge endpoint."""
+        """Lazily initialise the judge LLM client (OpenRouter-hosted)."""
         if not self._clients:
-            for base in self.judge_api_bases:
-                self._clients.append(LiteLLMClient(
-                    model=self.judge_model,
-                    api_base=base,
-                    api_key="EMPTY",
-                    temperature=0.7,
-                    top_p=0.8,
-                    top_k=20,
-                    max_tokens=4096,
-                ))
+            self._clients.append(get_litellm_client(
+                model_name=self.judge_model,
+                temperature=0.7,
+                top_p=0.8,
+                top_k=20,
+                max_tokens=4096,
+            ))
         return self._clients
 
     @staticmethod

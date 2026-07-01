@@ -106,9 +106,15 @@ class GLM_Agent(BasicAgent):
         self.verbose = verbose
         self._api_key = api_key or os.getenv("GLM_API_KEY", "EMPTY")
 
-        # Per-call output caps. Subclasses serving reasoning ("thinking") models
-        # raise these so a full reasoning block fits before a tool call / answer
-        # is forced (see Qwen3_Agent).
+        # OpenRouter omits reasoning tokens unless they are explicitly requested,
+        # and returns them under ``reasoning`` rather than vLLM's
+        # ``reasoning_content`` (handled in ``_read_reasoning``).  Opt in so the
+        # think block is emitted; vLLM ignores this extra field. Spread into
+        # every chat.completions.create() call via ``_chat_sampling_kwargs``.
+        if "openrouter.ai" in (self.model_url or ""):
+            self._sampling = {"extra_body": {"reasoning": {"enabled": True}}}
+
+        # Per-call output caps.
         self._max_tokens_per_call = 4096
         self._answer_candidate_max_tokens = 1024
 
@@ -127,6 +133,36 @@ class GLM_Agent(BasicAgent):
         )
 
     # _get_tool_definitions() and _format_search_results() inherited from BasicAgent
+
+    def _read_reasoning(self, message: Any) -> Optional[str]:
+        """Extract the reasoning/think text from an assistant message.
+
+        Provider-agnostic: vLLM exposes the think block as
+        ``reasoning_content``; OpenRouter uses ``reasoning`` (a plain string)
+        and ``reasoning_details`` (structured/encrypted blocks).  We read
+        whichever is present so the trajectory captures reasoning on both
+        backends.
+        """
+        reasoning = (
+            getattr(message, "reasoning_content", None)
+            or getattr(message, "reasoning", None)
+        )
+        if reasoning:
+            return reasoning
+
+        details = getattr(message, "reasoning_details", None)
+        if details:
+            parts: List[str] = []
+            for d in details:
+                if isinstance(d, dict):
+                    text = d.get("text") or d.get("summary")
+                else:
+                    text = getattr(d, "text", None) or getattr(d, "summary", None)
+                if text:
+                    parts.append(text)
+            if parts:
+                return "\n".join(parts)
+        return None
 
     # ── Answer candidate (Chat Completions, same client as main loop) ───────
 
@@ -170,6 +206,7 @@ class GLM_Agent(BasicAgent):
                 model=cfg.model_name,
                 messages=messages,
                 max_tokens=min(remaining_tokens, self._answer_candidate_max_tokens),
+                **self._chat_sampling_kwargs(),
             )
         except Exception:
             logger.warning("Answer candidate API call failed", exc_info=True)
@@ -178,7 +215,7 @@ class GLM_Agent(BasicAgent):
             )]
 
         raw = response.choices[0].message.content or ""
-        reasoning_content = getattr(response.choices[0].message, "reasoning_content", None)
+        reasoning_content = self._read_reasoning(response.choices[0].message)
         if not raw.strip() and reasoning_content:
             raw = "[reasoning_fallback]" + reasoning_content
 
@@ -268,15 +305,18 @@ class GLM_Agent(BasicAgent):
                     })
                 break
             try:
-                # `generation_temp` is intentionally NOT forwarded: sampling is
-                # left to the served model's generation_config defaults. This is
-                # required for Qwen3-Thinking models, whose model card forbids
-                # greedy/temperature=0 decoding (the pipeline default is 0.0).
+                # `generation_temp` (the pipeline-wide default, often 0.0) is
+                # intentionally NOT forwarded — greedy decoding degrades some
+                # reasoning ("thinking") models. Instead, per-agent sampling
+                # overrides (see `_sampling`) carry the model card's official
+                # params. For GLM this is empty, so the server's
+                # generation_config decides.
                 response = client.chat.completions.create(
                     model=cfg.model_name,
                     messages=messages,
                     tools=tools,
                     max_tokens=remaining_tokens,
+                    **self._chat_sampling_kwargs(),
                 )
             except Exception as e:
                 logger.warning(f"Iteration {iteration} API error: {e}")
@@ -303,9 +343,24 @@ class GLM_Agent(BasicAgent):
             self.token_meter.record_usage(getattr(response, "usage", None))
 
             message = response.choices[0].message
-            cur_reasoning = getattr(message, "reasoning_content", None)
+            cur_reasoning = self._read_reasoning(message)
             cur_text = message.content
             official_tool_calls = message.tool_calls or []
+
+            # Diagnostic: set DRA_DEBUG_RAW=1 to dump the raw server response per
+            # iteration (reasoning vs content vs tool_calls vs finish_reason).
+            # Off by default → no effect on normal runs or other agents.
+            if os.getenv("DRA_DEBUG_RAW"):
+                _raw_rc = self._read_reasoning(message)
+                _fr = response.choices[0].finish_reason
+                _ct = response.usage.completion_tokens if response.usage else "?"
+                print(
+                    f"[RAW iter {iteration}] finish={_fr} compl_tokens={_ct} "
+                    f"| reasoning_content(len={len(_raw_rc or '')})={(_raw_rc or '')[:160]!r} "
+                    f"| content(len={len(cur_text or '')})={(cur_text or '')[:160]!r} "
+                    f"| tool_calls={[ (t.function.name, t.function.arguments[:80]) for t in official_tool_calls ]}",
+                    flush=True,
+                )
 
             # vLLM bug: reasoning-only response with no content and no tool calls
             if cur_reasoning and not cur_text and not official_tool_calls:

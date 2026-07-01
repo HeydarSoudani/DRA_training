@@ -17,6 +17,7 @@ torchaudio==2.11.0
 torchvision==0.26.0
 vllm==0.24.0
 transformers==5.12.1           # >=5.5.3 (vllm) and <6 (pyserini)
+accelerate==1.14.0             # required by transformers when device_map is used
 sentence-transformers==5.6.0
 safetensors==0.8.0
 numpy==2.4.6                   # <2.5: numba (transitive) requires numpy<2.5

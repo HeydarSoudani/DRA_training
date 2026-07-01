@@ -42,8 +42,8 @@ fi
 set -euo pipefail
 
 PARTITION="${1:-h100}"
-TIME="${TIME:-1:00:00}"
-GPUS="${GPUS:-2}"
+TIME="${TIME:-0:30:00}"
+GPUS="${GPUS:-1}"
 
 case "$PARTITION" in
     a100|gpu_a100) PART=gpu_a100; CPUS_PER_GPU=18; MEM_PER_GPU=120 ;;
@@ -66,7 +66,11 @@ echo "[run_interactive_node] requesting: $PART  gpus=$GPUS  cpus=$CPUS  mem=$MEM
 # sources this script in SETUP mode so `base` + the env vars are active the
 # moment the prompt appears.
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
-RCFILE="$(mktemp)"
+# NB: the rcfile must live on a SHARED filesystem. srun launches bash on the
+# compute node, where /tmp is node-local — a default `mktemp` (→ /tmp) file
+# written here on the login node would be invisible there, so bash would start
+# with no rcfile and the env would never get activated. $HOME is shared GPFS.
+RCFILE="$(mktemp "${HOME}/.dra_interactive_rc.XXXXXX")"
 cat > "$RCFILE" <<EOF
 [ -f ~/.bashrc ] && source ~/.bashrc
 source "$SELF"

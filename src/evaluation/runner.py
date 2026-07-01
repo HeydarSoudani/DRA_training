@@ -6,7 +6,9 @@ run.  Used by ``experiments/dra_inference.py``:
     build_evaluators                Instantiate Retrieval/Generation/Trajectory/
                                     CitedDoc/SeenDoc/Accuracy evaluators.
     load_processed_results          Reload saved files for resumed queries.
-    evaluate_and_save               Run all evaluations and write summary.json.
+    evaluate_and_save               Run all evaluations and write summary.json
+                                    (grouped: answer / retrieval / trajectory /
+                                    generation / controller), plus terminal log.
 
 Related code now lives elsewhere:
     * Reranker construction      → ``searcher_component.rerankers.build_reranker_from_config``
@@ -35,6 +37,7 @@ from . import (
     CitedDocEvaluator,
     SeenDocEvaluator,
     AccuracyEvaluator,
+    TRQAGenerationEvaluator,
     ReportEvaluator,
 )
 
@@ -43,16 +46,20 @@ from . import (
 # Evaluator construction + results loading / evaluation
 # ===========================================================================
 
-def build_evaluators(qrels: Dict, kwargs: Dict[str, Any], answers: Optional[Dict[str, str]] = None, questions: Optional[Dict[str, str]] = None) -> Tuple[SurfacedDocEvaluator, GenerationEvaluator, TrajectoryEvaluator, CitedDocEvaluator, SeenDocEvaluator, Optional[AccuracyEvaluator], Optional[ReportEvaluator], ControllerEvaluator]:
+def build_evaluators(qrels: Dict, kwargs: Dict[str, Any], answers: Optional[Dict[str, str]] = None, questions: Optional[Dict[str, str]] = None, dataset: Optional[str] = None) -> Tuple[SurfacedDocEvaluator, GenerationEvaluator, TrajectoryEvaluator, CitedDocEvaluator, SeenDocEvaluator, Optional[AccuracyEvaluator], Optional[ReportEvaluator], ControllerEvaluator]:
     """Instantiate Retrieval, Generation, Trajectory, CitedDoc, SeenDoc, Accuracy, Report, and Controller evaluators.
 
     Args:
         qrels:     Qrels dict loaded from the dataset.
         kwargs:    Pipeline configuration dict.
         answers:   Optional mapping of query_id -> ground-truth answer.
-                   When provided (e.g. for BrowseComp-Plus), an AccuracyEvaluator
-                   (short-answer correctness) is created.
+                   When provided, an answer-correctness evaluator is created in
+                   the accuracy slot: for ``dataset == "trqa"`` this is the
+                   rule-based numeric :class:`TRQAGenerationEvaluator` (no LLM);
+                   otherwise (e.g. BrowseComp-Plus) the LLM-as-judge
+                   :class:`AccuracyEvaluator`.
         questions: Optional mapping of query_id -> question text.
+        dataset:   Dataset name; selects the accuracy-slot evaluator.
 
     Returns:
         ``(retrieval_evaluator, generation_evaluator, trajectory_evaluator,
@@ -78,24 +85,32 @@ def build_evaluators(qrels: Dict, kwargs: Dict[str, Any], answers: Optional[Dict
         interleaving_window=kwargs.get("interleaving_window", 3),
         rrf_k=kwargs.get("rrf_k", 60),
     )
+    judge_model = kwargs.get("judge_model")
+
     accuracy_evaluator = None
     if answers:
-        judge_kwargs: Dict[str, Any] = {}
-        judge_api_url = kwargs.get("judge_api_url")
-        if judge_api_url:
-            judge_kwargs["judge_api_base"] = judge_api_url
-        accuracy_evaluator = AccuracyEvaluator(
-            answers=answers,
-            questions=questions,
-            **judge_kwargs,
-        )
+        if dataset == "trqa":
+            # TRQA answers are numeric → rule-based exact/soft match, no LLM judge.
+            accuracy_evaluator = TRQAGenerationEvaluator(
+                answers=answers,
+                questions=questions,
+            )
+        else:
+            # BrowseComp-Plus (and other short-answer datasets) → LLM-as-judge.
+            judge_kwargs: Dict[str, Any] = {}
+            if judge_model:
+                judge_kwargs["judge_model"] = judge_model
+            accuracy_evaluator = AccuracyEvaluator(
+                answers=answers,
+                questions=questions,
+                **judge_kwargs,
+            )
 
     report_evaluator = None
     if kwargs.get("report_eval"):
         report_kwargs: Dict[str, Any] = {}
-        judge_api_url = kwargs.get("judge_api_url")
-        if judge_api_url:
-            report_kwargs["judge_api_base"] = judge_api_url
+        if judge_model:
+            report_kwargs["judge_model"] = judge_model
         report_evaluator = ReportEvaluator(
             questions=questions,
             qrels=qrels,
@@ -133,8 +148,9 @@ def load_processed_results(processed: set, retrieval_dir, results: Dict[str, Any
     if not Path(retrieval_dir_str).exists():
         return
 
-    # run_dir is the parent of retrieval_dir (e.g. outputs/run_name/)
-    run_dir = Path(retrieval_dir_str).parent
+    # run_dir is two levels up from the surfaced retrieval dir
+    # (retrieval_dir = {run_dir}/retrieval/surfaced)
+    run_dir = Path(retrieval_dir_str).parent.parent
 
     to_load = [qid for qid in processed if qid not in results]
     if not to_load:
@@ -193,15 +209,25 @@ def load_processed_results(processed: set, retrieval_dir, results: Dict[str, Any
             print(f"Warning: could not save eval cache: {e}")
 
 
-def evaluate_and_save(results: Dict[str, Any], generation_evaluator: GenerationEvaluator, trajectory_evaluator: TrajectoryEvaluator, run_dir: Optional[Path], cited_doc_evaluator: Optional[CitedDocEvaluator] = None, seen_doc_evaluator: Optional[SeenDocEvaluator] = None, accuracy_evaluator: Optional[AccuracyEvaluator] = None, controller_metrics: Optional[Dict[str, Any]] = None, controller_evaluator=None, report_evaluator: Optional[ReportEvaluator] = None) -> None:
-    """Run all evaluations, print results, and save summary.json.
+def evaluate_and_save(results: Dict[str, Any], generation_evaluator: GenerationEvaluator, trajectory_evaluator: TrajectoryEvaluator, run_dir: Optional[Path], cited_doc_evaluator: Optional[CitedDocEvaluator] = None, seen_doc_evaluator: Optional[SeenDocEvaluator] = None, accuracy_evaluator: Optional[AccuracyEvaluator] = None, controller_metrics: Optional[Dict[str, Any]] = None, controller_evaluator=None, report_evaluator: Optional[ReportEvaluator] = None, fusion_metrics: Optional[Dict[str, Any]] = None) -> None:
+    """Run all evaluations, print results, and write summary.json in one pass.
 
-    Retrieval metrics are produced per fusion method by
-    :func:`run_fusion_eval` and stored under the ``"retrieval"`` key in
-    summary.json.  This function handles generation, trajectory,
-    cited-doc, seen-doc, accuracy, and controller evaluation.
+    Builds a single grouped ``summary`` dict and derives both the terminal log
+    and the on-disk ``summary.json`` from it, so the two never drift.  The
+    schema mirrors the ``run_outputs/.../`` directory layout:
 
-    Terminal output order matches the summary.json structure.
+        {
+          "num_queries": N,
+          "answer":     {"accuracy": {...}, "report": {...}},   # when available
+          "retrieval":  {"fusion": {...}, "seen": {...}, "cited": {...}},
+          "trajectory": {...},
+          "generation": {...},
+          "controller": {...},                                  # when ctrl on
+        }
+
+    Fusion metrics are computed beforehand by :func:`run_fusion_eval` and
+    passed in via *fusion_metrics* so the file is written exactly once (no
+    read-modify-write second pass).
 
     Args:
         results:               Unified results dict keyed by query_id.
@@ -217,6 +243,10 @@ def evaluate_and_save(results: Dict[str, Any], generation_evaluator: GenerationE
                                provided, ``controller_metrics`` is ignored and
                                the evaluator is run here so printing follows
                                the canonical summary order.
+        report_evaluator:      Optional long-form report evaluator.
+        fusion_metrics:        Per-method surfaced-doc fusion metrics from
+                               :func:`run_fusion_eval`; nested under
+                               ``retrieval.fusion``.
     """
     # ------------------------------------------------------------------
     # 1. Evaluate everything (no printing yet)
@@ -269,15 +299,63 @@ def evaluate_and_save(results: Dict[str, Any], generation_evaluator: GenerationE
         )
 
     # ------------------------------------------------------------------
-    # 3. Print in canonical summary order
+    # 3. Assemble the grouped summary (single source of truth)
     # ------------------------------------------------------------------
-    # Extract Metrics@N from cited_doc_metrics for top-level display
+    # Headline Metrics@N comes from the cited-doc evaluator; it stays nested
+    # inside retrieval.cited (and retrieval.seen) rather than being duplicated
+    # at the top level.
     metrics_at_n = {}
     if cited_doc_metrics:
-        metrics_at_n = cited_doc_metrics.pop("Metrics@N", {})
-        metrics_at_n.pop("num_queries", None)
+        metrics_at_n = {k: v for k, v in cited_doc_metrics.get("Metrics@N", {}).items()
+                        if k != "num_queries"}
 
-    # -- num_queries + Metrics@N
+    summary: Dict[str, Any] = {"num_queries": num_queries}
+
+    # -- answer: accuracy (+ long-form report)
+    answer: Dict[str, Any] = {}
+    if accuracy_metrics:
+        acc = {
+            "accuracy": accuracy_metrics["accuracy"],
+            "num_correct": accuracy_metrics["num_correct"],
+            "num_evaluated": accuracy_metrics["num_evaluated"],
+        }
+        # TRQA (rule-based) also reports exact-match and soft-match by tolerance.
+        if "exact_match" in accuracy_metrics:
+            acc["exact_match"] = accuracy_metrics["exact_match"]
+        if "soft_exact_match" in accuracy_metrics:
+            acc["soft_exact_match"] = accuracy_metrics["soft_exact_match"]
+        answer["accuracy"] = acc
+    if report_metrics:
+        answer["report"] = {
+            "num_evaluated": report_metrics.get("num_evaluated", 0),
+            "rubric": report_metrics.get("rubric", {}),
+            "citation_faithfulness": report_metrics.get("citation_faithfulness"),
+        }
+    if answer:
+        summary["answer"] = answer
+
+    # -- retrieval: surfaced fusion + seen + cited (mirrors retrieval/ on disk)
+    retrieval: Dict[str, Any] = {}
+    if fusion_metrics:
+        retrieval["fusion"] = fusion_metrics
+    if seen_doc_metrics:
+        retrieval["seen"] = seen_doc_metrics
+    if cited_doc_metrics:
+        retrieval["cited"] = cited_doc_metrics
+    if retrieval:
+        summary["retrieval"] = retrieval
+
+    # -- trajectory / generation / controller
+    if trajectory_metrics:
+        summary["trajectory"] = trajectory_metrics
+    summary["generation"] = generation_metrics
+    if controller_metrics:
+        summary["controller"] = controller_metrics
+
+    # ------------------------------------------------------------------
+    # 4. Print the terminal log in the same order as the summary
+    # ------------------------------------------------------------------
+    # -- header: num_queries + Metrics@N
     print(f"\n{'=' * 80}")
     print("EVALUATION SUMMARY")
     print("=" * 80)
@@ -290,16 +368,23 @@ def evaluate_and_save(results: Dict[str, Any], generation_evaluator: GenerationE
         print(f"    avg_N:       {metrics_at_n.get('avg_N', 0):.1f}")
     print("=" * 80)
 
-    # -- accuracy
+    # -- answer: accuracy, then long-form report
     if accuracy_evaluator is not None:
         accuracy_evaluator.print_results(accuracy_metrics)
-
-    # -- report (long-form generation)
     if report_evaluator is not None:
         report_evaluator.print_results(report_metrics)
 
+    # -- retrieval: cited + seen tables (fusion already printed by run_fusion_eval)
+    if cited_doc_evaluator is not None:
+        cited_doc_evaluator.print_results(cited_doc_metrics, header="RETRIEVAL EVALUATION RESULTS (CITED DOCS)")
+    if seen_doc_evaluator is not None:
+        seen_doc_evaluator.print_results(seen_doc_metrics, header="RETRIEVAL EVALUATION RESULTS (SEEN DOCS)")
+
     # -- trajectory
     trajectory_evaluator.print_results(trajectory_metrics)
+
+    # -- generation
+    generation_evaluator.print_results(generation_metrics)
 
     # -- controller
     if controller_metrics:
@@ -313,65 +398,19 @@ def evaluate_and_save(results: Dict[str, Any], generation_evaluator: GenerationE
                 print(f"  {k}: {v}")
             print("=" * 80)
 
-    # -- generation
-    generation_evaluator.print_results(generation_metrics)
-
-    # -- cited_doc_retrieval
-    if cited_doc_evaluator is not None:
-        cited_doc_evaluator.print_results(cited_doc_metrics, header="RETRIEVAL EVALUATION RESULTS (CITED DOCS)")
-
-    # -- seen_doc_retrieval
-    if seen_doc_evaluator is not None:
-        seen_doc_evaluator.print_results(seen_doc_metrics, header="RETRIEVAL EVALUATION RESULTS (SEEN DOCS)")
-
-    # -- Save accuracy detail file
+    # -- Save accuracy / report detail files
     if accuracy_metrics and run_dir and accuracy_evaluator is not None:
-        acc_path = str(Path(str(run_dir)) / "accuracy.json")
+        acc_path = str(Path(str(run_dir)) / "accuracy.jsonl")
         accuracy_evaluator.save_results(accuracy_metrics, acc_path)
-
-    # -- Save report detail file
     if report_metrics and run_dir and report_evaluator is not None:
         report_path = str(Path(str(run_dir)) / "report_eval.json")
         report_evaluator.save_results(report_metrics, report_path)
 
     # ------------------------------------------------------------------
-    # 4. Build and save summary.json in canonical order
+    # 5. Write summary.json once
     # ------------------------------------------------------------------
     if run_dir:
-        summary = {"num_queries": num_queries}
-
-        if metrics_at_n:
-            summary["Metrics@N"] = metrics_at_n
-
-        if accuracy_metrics:
-            summary["accuracy"] = {
-                "accuracy": accuracy_metrics["accuracy"],
-                "num_correct": accuracy_metrics["num_correct"],
-                "num_evaluated": accuracy_metrics["num_evaluated"],
-            }
-
-        if report_metrics:
-            summary["report"] = {
-                "num_evaluated": report_metrics.get("num_evaluated", 0),
-                "rubric": report_metrics.get("rubric", {}),
-                "citation_faithfulness": report_metrics.get("citation_faithfulness"),
-            }
-
-        if trajectory_metrics:
-            summary["trajectory"] = trajectory_metrics
-
-        if controller_metrics:
-            summary["controller"] = controller_metrics
-
-        summary["generation"] = generation_metrics
-
-        if cited_doc_metrics:
-            summary["cited_doc_retrieval"] = cited_doc_metrics
-        if seen_doc_metrics:
-            summary["seen_doc_retrieval"] = seen_doc_metrics
-
         run_dir_str = str(run_dir)
-        summary_content = json.dumps(summary, indent=2)
         with open(Path(run_dir_str) / "summary.json", "w") as f:
-            f.write(summary_content)
+            f.write(json.dumps(summary, indent=2))
         print(f"  ✓ Saved summary: {run_dir_str}/summary.json")

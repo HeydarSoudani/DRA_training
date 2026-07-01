@@ -271,6 +271,21 @@ class BasicAgent(AgentVerboseMixin):
 
         self.inference_config: InferenceConfig = InferenceConfig()
 
+        # Per-agent Chat Completions sampling overrides spread into every
+        # client.chat.completions.create() call. Empty by default (let the
+        # served model's generation_config decide). Agents that are sensitive to
+        # decoding populate this with their official sampling params (e.g. GLM
+        # sets extra_body to request reasoning tokens over OpenRouter).
+        self._sampling: Dict[str, Any] = {}
+
+    def _chat_sampling_kwargs(self) -> Dict[str, Any]:
+        """Sampling kwargs to spread into chat.completions.create() calls.
+
+        Returns a shallow copy so callers can mutate (e.g. add max_tokens)
+        without clobbering the agent-level defaults.
+        """
+        return dict(getattr(self, "_sampling", {}) or {})
+
     # Agent display name used by _display_name property; subclasses can override.
     AGENT_NAME: str = "Agent"
 
@@ -553,6 +568,7 @@ class BasicAgent(AgentVerboseMixin):
                 model=cfg.model_name,
                 messages=trimmed,
                 max_tokens=force_max_tokens,
+                **self._chat_sampling_kwargs(),
             )
             return response.choices[0].message.content
         except Exception as e:
@@ -585,6 +601,7 @@ class BasicAgent(AgentVerboseMixin):
                 model=cfg.model_name,
                 messages=messages,
                 max_tokens=force_max_tokens,
+                **self._chat_sampling_kwargs(),
             )
             return response.choices[0].message.content
         except Exception as e:

@@ -235,7 +235,11 @@ def build_agent(
             _reasoning_extra["model_name"] = _slug
             _reasoning_extra["api_key"] = os.getenv("OPENROUTER_API_KEY")
     elif agentic_model == "oss":
-        _reasoning_extra["max_output_tokens"] = max_output_tokens_total
+        # Cap per-call output like GLM so the prompt/history still fits inside
+        # the 131072-token vLLM window (gpt-oss native max = OpenRouter's max).
+        # On the OpenRouter Responses path truncation:"auto" reclaims the full
+        # window regardless of this ceiling.
+        _reasoning_extra["max_output_tokens"] = min(max_output_tokens_total, 20000)
         # Prefer OpenRouter (Responses API) when oss_20b / oss_120b is in the
         # registry; otherwise use the agent's local vLLM defaults (localhost:6008).
         _backend, _slug = resolve_agent_backend(_cli_name)
@@ -245,20 +249,6 @@ def build_agent(
             _reasoning_extra["api_key"] = os.getenv("OPENROUTER_API_KEY")
         else:
             _reasoning_extra["model_name"] = f"openai/{llm_model}"
-    elif agentic_model == "qwen3":
-        # Two CLI sizes (qwen3_4b_thinking / qwen3_30b_thinking) collapse to the
-        # "qwen3" agent; the concrete model is carried by llm_model.  The Chat
-        # Completions call must name the model exactly as vLLM serves it (the
-        # full HF id), so forward llm_model as model_name.
-        _reasoning_extra["max_output_tokens"] = min(max_output_tokens_total, 20000)
-        _reasoning_extra["model_name"] = llm_model
-        # Prefer OpenRouter when the agent is in the registry (0 local GPU);
-        # otherwise fall through to the agent's vLLM defaults (localhost:6008).
-        _backend, _slug = resolve_agent_backend(_cli_name)
-        if _backend == "api":
-            _reasoning_extra["model_url"] = OPENROUTER_BASE_URL
-            _reasoning_extra["model_name"] = _slug
-            _reasoning_extra["api_key"] = os.getenv("OPENROUTER_API_KEY")
     elif agentic_model == "tongyi":
         _reasoning_extra["max_tokens_per_step"] = min(max_output_tokens_total, 20000)
     elif agentic_model == "cpm_explore":
@@ -507,11 +497,11 @@ def gpu_worker(worker_id: int, query_items: list, temp_dir_str: str, worker_conf
         return {}
 
     temp_dir       = Path(temp_dir_str)
-    retrieval_dir  = str(temp_dir / "retrieval")
+    retrieval_dir  = str(temp_dir / "retrieval" / "surfaced")
     generation_dir = str(temp_dir / "generation")
     trajectory_dir = str(temp_dir / "trajectory")
-    cited_doc_dir  = str(temp_dir / "cited_docs_retrieval")
-    seen_doc_dir   = str(temp_dir / "seen_docs_retrieval")
+    cited_doc_dir  = str(temp_dir / "retrieval" / "cited")
+    seen_doc_dir   = str(temp_dir / "retrieval" / "seen")
     controller_dir = str(temp_dir / "controller")
     for _d in [retrieval_dir, generation_dir, trajectory_dir, cited_doc_dir, seen_doc_dir, controller_dir]:
         Path(_d).mkdir(parents=True, exist_ok=True)

@@ -34,9 +34,8 @@ def is_local_finetuned(agentic_model: str, llm_model: str) -> bool:
 # Single source of truth: CLI --agentic-model value → the LLM it runs on.
 # --llm-model is no longer a CLI input; it is derived from this map.
 # Some agents are exposed under multiple CLI names so different model sizes are
-# selectable (oss_20b / oss_120b → "oss"; qwen3_4b_thinking / qwen3_30b_thinking
-# → "qwen3"); AGENTIC_MODEL_ALIAS maps each back to the internal agent name used
-# by AGENT_MAP / SELF_MANAGED_LLM_AGENTS.
+# selectable (oss_20b / oss_120b → "oss"); AGENTIC_MODEL_ALIAS maps each back to
+# the internal agent name used by AGENT_MAP / SELF_MANAGED_LLM_AGENTS.
 AGENTIC_MODEL_TO_LLM: Dict[str, str] = {
     # self-managed (vLLM)
     "cpm_report":  "openbmb/AgentCPM-Report",
@@ -45,8 +44,6 @@ AGENTIC_MODEL_TO_LLM: Dict[str, str] = {
     "tongyi":      "Alibaba-NLP/Tongyi-DeepResearch-30B-A3B",
     "oss_20b":     "gpt-oss-20b",
     "oss_120b":    "gpt-oss-120b",
-    "qwen3_4b_thinking":  "Qwen/Qwen3-4B-Thinking-2507",
-    "qwen3_30b_thinking": "Qwen/Qwen3-30B-A3B-Thinking-2507",
     # local-finetuned (vLLM)
     "webweaver":   "Alibaba-NLP/Tongyi-DeepResearch-30B-A3B",
     "drtulu":      "rl-research/DR-Tulu-8B",
@@ -63,8 +60,6 @@ AGENTIC_MODEL_TO_LLM: Dict[str, str] = {
 AGENTIC_MODEL_ALIAS: Dict[str, str] = {
     "oss_20b":  "oss",
     "oss_120b": "oss",
-    "qwen3_4b_thinking":  "qwen3",
-    "qwen3_30b_thinking": "qwen3",
 }
 
 
@@ -73,7 +68,7 @@ AGENTIC_MODEL_ALIAS: Dict[str, str] = {
 from indexing_corpus_dataset.layout import DATA_ROOT as _IR_ROOT
 
 # Agents that manage their own LLM connection (direct vLLM/OpenAI clients)
-SELF_MANAGED_LLM_AGENTS = frozenset({"oss", "tongyi", "glm", "qwen3", "cpm_explore", "cpm_report"})
+SELF_MANAGED_LLM_AGENTS = frozenset({"oss", "tongyi", "glm", "cpm_explore", "cpm_report"})
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +106,38 @@ def load_openrouter_registry() -> Dict[str, str]:
         return {}
     models = data.get("models") or {}
     return {str(k): str(v) for k, v in models.items() if v}
+
+
+@functools.lru_cache(maxsize=1)
+def load_model_display_names() -> Dict[str, str]:
+    """Load the optional ``display_names`` overrides from the registry file.
+
+    Maps a full model id (e.g. ``zai-org/GLM-4.7-Flash``) to a short, curated
+    label used in output directory names.  Empty when the section is absent.
+    """
+    try:
+        import yaml  # lazy: keep this module import-light
+        with open(_OPENROUTER_REGISTRY_PATH) as fh:
+            data = yaml.safe_load(fh) or {}
+    except (FileNotFoundError, ImportError):
+        return {}
+    names = data.get("display_names") or {}
+    return {str(k): str(v) for k, v in names.items() if v}
+
+
+def model_display_name(model: str) -> str:
+    """Short, filesystem-friendly label for a model id.
+
+    Uses a curated override from the registry's ``display_names`` section when
+    present; otherwise falls back to the last path segment, lowercased
+    (``zai-org/GLM-4.7-Flash`` -> ``glm-4.7-flash``).
+    """
+    if not model:
+        return "default"
+    override = load_model_display_names().get(model)
+    if override:
+        return override
+    return model.split("/")[-1].lower()
 
 
 def resolve_agent_backend(agentic_model: str) -> Tuple[str, Optional[str]]:

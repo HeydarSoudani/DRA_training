@@ -24,7 +24,7 @@
 llm_temperature: 0.0            # Sampling temperature
 llm_max_tokens_per_call: 10000  # Max tokens generated per single LLM API call
 llm_top_p: 1.0                  # Top-p sampling (reasoning agents only)
-max_output_tokens_total: 20000  # Cumulative output-token budget per query (oss/glm/tongyi only)
+max_output_tokens_total: 120000 # Cumulative output-token budget per query (oss/glm/tongyi).
 request_timeout: 300            # HTTP request timeout (s) for LLM API calls
 
 # ── Dataset (null = auto-selected from --dataset) ────────────────────────────
@@ -71,7 +71,7 @@ interleaving_window: 3          # Block size for interleaving fusion
 rrf_k: 60                       # K parameter for reciprocal rank fusion
 fusion_k: 100                   # Only first K docs per list passed to fusion method
 fusion_methods: ["interleaving"]  # Subset of aggregation fusion methods to evaluate
-judge_api_url: null             # External judge server base URL; null = auto-start own Qwen3-32B judge
+judge_model: "openrouter/qwen/qwen3-32b"  # LLM-as-judge for BrowseComp-Plus accuracy + report rubric (OpenRouter; needs OPENROUTER_API_KEY). TRQA uses rule-based numeric match (no judge).
 
 # ── Execution & output ───────────────────────────────────────────────────────
 output: null                    # Root dir for results; null = experiments/run_outputs/

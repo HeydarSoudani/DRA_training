@@ -105,15 +105,17 @@ Run defaults (top_k, rerankers, controller LLM, eval k-values, …) are in
 ### Output format
 
 ```
-$DRA_OUTPUT_ROOT/{dataset}_{split}_{query_key}_{retriever}/{agent}_agent_{model}/{searcher_config}/
-├── retrieval/{qid}.trec            per-query TREC (all iterations, col 6 = iter_N)
+$DRA_OUTPUT_ROOT/{dataset}_{split}_{query_key}_{retriever}/{agent}_{backend}_{model}/{controller_config}/
+├── run_config.json                 full agent/searcher/controller settings
+├── retrieval/
+│   ├── surfaced/{qid}.trec         raw retriever output (all iterations, col 6 = iter_N)
+│   ├── seen/{qid}.trec             docs shown to the LLM
+│   ├── cited/{qid}.trec            docs cited by the LLM
+│   └── fusion_{method}.trec        deduped fusion ranking (aggregate over all queries)
 ├── generation/{qid}.md             per-query report (markdown)
-├── trajectory/{qid}.json           {qid, question, trajectory}
-├── controller/{qid}.json           {qid, per_iteration: [...]}
-├── cited_docs_retrieval/{qid}.trec docs cited by the LLM
-├── seen_docs_retrieval/{qid}.trec  docs shown to the LLM
-├── ranking_results.trec            aggregated retrieval
-└── summary.json                    metrics
+├── trajectory/{qid}.jsonl          meta line + one line per step
+├── controller/{qid}.jsonl          meta line + one line per iteration
+└── summary.json                    grouped metrics (answer / retrieval / trajectory / generation / controller)
 ```
 
 ## 4. Training

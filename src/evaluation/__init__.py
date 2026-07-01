@@ -52,6 +52,7 @@ from .generation import (
     GenerationEvaluator,
     ShortAnswerEvaluator,
     AccuracyEvaluator,
+    TRQAGenerationEvaluator,
     ReportEvaluator,
 )
 
@@ -80,6 +81,7 @@ __all__ = [
     "GenerationEvaluator",
     "ShortAnswerEvaluator",
     "AccuracyEvaluator",
+    "TRQAGenerationEvaluator",
     "ReportEvaluator",
     # Trajectory evaluation
     "TrajectoryEvaluator",

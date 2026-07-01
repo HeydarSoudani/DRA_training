@@ -78,7 +78,7 @@ class HFGenerator(BaseGenerator):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+            dtype=torch.float16 if self.device == "cuda" else torch.float32,
             device_map="auto" if self.device == "cuda" else None,
             trust_remote_code=True,
         )

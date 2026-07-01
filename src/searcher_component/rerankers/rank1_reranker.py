@@ -153,7 +153,7 @@ class Rank1Reranker:
             )
             self._model = AutoModelForCausalLM.from_pretrained(
                 model_path,
-                torch_dtype=torch.float16 if precision == "float16" else torch.float32,
+                dtype=torch.float16 if precision == "float16" else torch.float32,
                 device_map=self.device,
             )
             self._model.eval()

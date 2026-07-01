@@ -7,8 +7,9 @@ The prompt and scoring methodology are taken from BrowseComp-Plus
 (Chen et al., 2025, arXiv:2508.06600), which itself adopts the grading
 prompt from OpenAI's BrowseComp simple-evals.
 
-Judge model: Qwen3-32B served via vLLM — matches the official
-BrowseComp-Plus / AgentIR leaderboard.
+Judge model: Qwen3-32B served via OpenRouter (``openrouter/qwen/qwen3-32b``) —
+matches the official BrowseComp-Plus / AgentIR leaderboard model, hosted instead
+of run on local GPUs.  Requires ``OPENROUTER_API_KEY`` in the environment.
 
 Scoring: binary (correct / incorrect).  Accuracy = #correct / #total.
 """
@@ -22,7 +23,10 @@ from typing import Any, Dict, List, Optional
 
 from tqdm import tqdm
 
+from reasoner_component.api import get_litellm_client
 from utils.llm_client import LiteLLMClient
+
+DEFAULT_JUDGE_MODEL = "openrouter/qwen/qwen3-32b"
 
 logger = logging.getLogger(__name__)
 
@@ -136,8 +140,7 @@ class AccuracyEvaluator:
         answers = {"q1": "ground truth answer 1", "q2": "ground truth answer 2"}
         evaluator = AccuracyEvaluator(
             answers=answers,
-            judge_model="openai/Qwen/Qwen3-32B",
-            judge_api_base="http://localhost:6009/v1",
+            judge_model="openrouter/qwen/qwen3-32b",
         )
         metrics = evaluator.evaluate(results)
         evaluator.print_results(metrics)
@@ -150,9 +153,7 @@ class AccuracyEvaluator:
         self,
         answers: Dict[str, str],
         questions: Optional[Dict[str, str]] = None,
-        judge_model: str = "openai/Qwen/Qwen3-32B",
-        judge_api_base: str = "http://localhost:6009/v1",
-        judge_api_bases: Optional[List[str]] = None,
+        judge_model: str = DEFAULT_JUDGE_MODEL,
         max_concurrent_judges: int = 64,
     ) -> None:
         """Initialise the evaluator.
@@ -161,37 +162,28 @@ class AccuracyEvaluator:
             answers:        Mapping of ``query_id -> ground-truth answer``.
             questions:      Mapping of ``query_id -> question text``.
                             If None, a generic placeholder is used.
-            judge_model:    LiteLLM model identifier for the judge
-                            (default: Qwen3-32B via local vLLM).
-            judge_api_base: OpenAI-compatible API base URL for a single
-                            vLLM judge server (used when *judge_api_bases*
-                            is not provided).
-            judge_api_bases: List of API base URLs for multiple judge
-                            servers.  Requests are distributed round-robin.
-            max_concurrent_judges: Max in-flight judge requests per server.
+            judge_model:    Model identifier for the judge, resolved by
+                            ``reasoner_component.api`` (default:
+                            ``openrouter/qwen/qwen3-32b`` via OpenRouter,
+                            requires ``OPENROUTER_API_KEY``).
+            max_concurrent_judges: Max in-flight judge requests.
         """
         self.answers = answers
         self.questions = questions or {}
         self.judge_model = judge_model
-        self.judge_api_bases: List[str] = (
-            judge_api_bases if judge_api_bases else [judge_api_base]
-        )
         self.max_concurrent_judges = max_concurrent_judges
         self._clients: List[LiteLLMClient] = []
 
     def _get_clients(self) -> List[LiteLLMClient]:
-        """Lazily initialise one LLM client per judge endpoint."""
+        """Lazily initialise the judge LLM client (OpenRouter-hosted)."""
         if not self._clients:
-            for base in self.judge_api_bases:
-                self._clients.append(LiteLLMClient(
-                    model=self.judge_model,
-                    api_base=base,
-                    api_key="EMPTY",
-                    temperature=0.7,
-                    top_p=0.8,
-                    top_k=20,
-                    max_tokens=4096,
-                ))
+            self._clients.append(get_litellm_client(
+                model_name=self.judge_model,
+                temperature=0.7,
+                top_p=0.8,
+                top_k=20,
+                max_tokens=4096,
+            ))
         return self._clients
 
     @staticmethod
@@ -384,7 +376,13 @@ class AccuracyEvaluator:
         pass
 
     def save_results(self, metrics: Dict[str, Any], output_path) -> None:
-        """Save accuracy metrics to a JSON file.
+        """Save accuracy metrics as a JSONL file (one line per sample).
+
+        Mirrors the trajectory saving convention: line 1 is a
+        ``{"record": "meta", ...}`` header carrying the run-level aggregates
+        (accuracy, correct/evaluated counts, judge model); each subsequent
+        line is one query's judge result (``raw_response`` dropped to keep the
+        file small).
 
         Supports both local paths and S3 URIs.
 
@@ -395,29 +393,31 @@ class AccuracyEvaluator:
         if not metrics:
             return
 
-        # Save summary (without raw_response to keep file small)
-        save_data = {
+        meta = {
+            "record": "meta",
             "accuracy": metrics["accuracy"],
             "num_correct": metrics["num_correct"],
             "num_evaluated": metrics["num_evaluated"],
             "judge_model": self.judge_model,
-            "per_query": [
-                {
+        }
+
+        def _dump(obj: Dict[str, Any]) -> str:
+            return json.dumps(obj, separators=(",", ":"), default=str)
+
+        output_path_str = str(output_path)
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(_dump(meta) + "\n")
+            for r in metrics.get("per_query", []):
+                f.write(_dump({
                     "query_id": r["query_id"],
                     "correct": r["correct"],
                     "extracted_final_answer": r.get("extracted_final_answer"),
                     "judge_input": r.get("judge_input"),
                     "reasoning": r.get("reasoning"),
                     "confidence": r.get("confidence"),
-                }
-                for r in metrics.get("per_query", [])
-            ],
-        }
-        output_path_str = str(output_path)
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(save_data, f, indent=2, default=str)
+                }) + "\n")
         print(f"  Saved accuracy results: {output_path_str}")
 
 
