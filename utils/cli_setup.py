@@ -61,7 +61,6 @@ FILE_BACKED_DEFAULTS = {
     # Agent-specific
     "use_plan": False,
     "max_extend_steps": 5,
-    "with_oracle_outline": False,
     "hard_mode": True,
     # Controller (the rest)
     "llm_controller": "claude-sonnet-4-6",
@@ -321,7 +320,6 @@ def assemble_pipeline_kwargs(args, llm_client, retriever, num_gpus: int, verbose
     pipeline_kwargs["use_plan"] = getattr(args, "use_plan", False)
     pipeline_kwargs["max_extend_steps"] = args.max_extend_steps
     pipeline_kwargs["hard_mode"] = args.hard_mode
-    pipeline_kwargs["oracle_outline_path"] = getattr(args, "with_oracle_outline", None)
 
     pipeline_kwargs["controller"] = getattr(args, "controller", "monitor")
     pipeline_kwargs["llm_intervene"] = getattr(args, "llm_intervene", None)
@@ -360,7 +358,6 @@ def assemble_pipeline_kwargs(args, llm_client, retriever, num_gpus: int, verbose
         "post_fusion_reranker_input":   args.post_fusion_reranker_input,
         "max_output_tokens_total":       getattr(args, "max_output_tokens_total", 40000),
         "use_plan":                      getattr(args, "use_plan", False),
-        "oracle_outline_path":           getattr(args, "with_oracle_outline", None),
         "controller":                    getattr(args, "controller", "monitor"),
         "llm_intervene":        getattr(args, "llm_intervene", None),
         "llm_controller":           getattr(args, "llm_controller", None),

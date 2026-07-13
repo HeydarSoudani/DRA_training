@@ -12,8 +12,8 @@ from typing import Any, Dict, List, Optional
 from .base import BaseDocRetrievalEvaluator
 
 _NON_SEARCH_ACTIONS = frozenset({
-    "write", "init-plan", "init-plan-oracle", "extend-plan", "nop",
-    "analyst-init_plan", "analyst-init_plan_oracle", "analyst-extend_plan",
+    "write", "init-plan", "extend-plan", "nop",
+    "analyst-init_plan", "analyst-extend_plan",
 })
 
 

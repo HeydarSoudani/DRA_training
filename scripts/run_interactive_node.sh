@@ -42,7 +42,7 @@ fi
 set -euo pipefail
 
 PARTITION="${1:-h100}"
-TIME="${TIME:-0:30:00}"
+TIME="${TIME:-1:00:00}"
 GPUS="${GPUS:-1}"
 
 case "$PARTITION" in

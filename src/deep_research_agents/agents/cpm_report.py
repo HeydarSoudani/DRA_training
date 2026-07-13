@@ -58,7 +58,6 @@ class CPMReport(BasicAgent):
         hard_mode: bool = True,
         verbose: bool = True,
         search_tool=None,
-        oracle_outline_path: str = None,
         max_passage_chars: int = 4000,
         model_name: str = "",
         model_url: str = None,
@@ -102,12 +101,6 @@ class CPMReport(BasicAgent):
                 api_type="chat_completion",
                 model_name=model_name,
             )
-
-        # Load oracle outline data if provided
-        self._oracle_data = None
-        if oracle_outline_path:
-            with open(oracle_outline_path, "r", encoding="utf-8") as f:
-                self._oracle_data = json.load(f)
 
         # Load prompts
         self.prompts = self._load_prompts()
@@ -161,8 +154,6 @@ class CPMReport(BasicAgent):
 
         prompts = {}
         prompt_names = ["search", "init_plan", "extend_plan", "write", "write_citation"]
-        if self._oracle_data is not None:
-            prompt_names.append("init_plan_oracle")
         for prompt_name in prompt_names:
             prompt_file = prompt_dir / f"{prompt_name}.txt"
             with open(prompt_file, 'r', encoding='utf-8') as f:
@@ -563,91 +554,6 @@ class CPMReport(BasicAgent):
             "input": {
                 "num_retrieved_docs": num_docs,
                 "retrieved_doc_ids": doc_ids,
-            },
-            "output": {
-                "title": survey.get("title", ""),
-                "num_sections": len(survey.get("sections", [])),
-                "sections": [s.get("title", "") for s in survey.get("sections", [])],
-            }
-        })
-
-        return state
-
-    async def _init_plan_oracle(self, state: Dict[str, Any], query_id: str) -> Dict[str, Any]:
-        """Create initial report outline from oracle aspects instead of retrieved passages.
-
-        Skips the initial search step entirely. Oracle aspects and descriptions
-        are fed to the LLM via the init_plan_oracle prompt so it can generate
-        the outline structure.
-        """
-        query = state["query"]
-
-        # Extract unique aspects from oracle data for this query
-        entry = self._oracle_data.get(str(query_id))
-        if entry is None:
-            self._print(f"  ⚠ Query {query_id!r} not found in oracle data, falling back to normal init_plan")
-            return state
-
-        aspects = []
-        seen_aspects = set()
-        for doc in entry.get("documents", []):
-            aspect_name = doc.get("aspect", "")
-            if aspect_name and aspect_name not in seen_aspects:
-                seen_aspects.add(aspect_name)
-                aspects.append({
-                    "name": aspect_name,
-                    "description": doc.get("aspect_description", ""),
-                })
-
-        if not aspects:
-            self._print(f"  ⚠ No aspects found in oracle data for {query_id!r}, falling back to normal init_plan")
-            return state
-
-        prompt = self.prompts["init_plan_oracle"].render(
-            user_query=query,
-            aspects=aspects,
-        )
-
-        step = state['step']
-        self._vprint(step, "oracle-init-plan", f"Using {len(aspects)} oracle aspects")
-
-        # Call LLM with temperature adjustment for retries
-        retry_count = state.get("retry_count", 0)
-        temperature = min(self._default_temperature + (retry_count * 0.3), 1.0)
-        messages = [{"role": "user", "content": prompt}]
-        response = await self._llm_call(messages, temperature=temperature, max_tokens=1000)
-
-        # Parse response (same as _init_plan)
-        result = self._parse_init_plan_response(response, query)
-        parsed = result.get("parse_success", False)
-        action = result.get("action", {})
-        thought = result.get("thought", "")
-
-        state["parsed"] = parsed
-
-        if not parsed or action.get("name") != "init-plan":
-            self._vprint(step, "plan-error", "Failed to parse oracle init-plan response")
-            return state
-
-        # Create survey
-        survey = {
-            "title": action.get("title", ""),
-            "sections": action.get("sections", [])
-        }
-        state["survey"] = survey
-        state["cursor"] = self._check_progress_position(survey)
-
-        section_titles = [s.get("title", "") for s in survey.get("sections", [])]
-        self._vprint(step, "oracle-init-plan", f"'{survey.get('title', '')}' with {len(section_titles)} sections: {section_titles}")
-
-        # Add to trajectory
-        state["trajectory"].append({
-            "step": state["step"],
-            "state": "analyst-init_plan_oracle",
-            "action": "init-plan-oracle",
-            "think": thought,
-            "input": {
-                "oracle_aspects": [a["name"] for a in aspects],
             },
             "output": {
                 "title": survey.get("title", ""),
@@ -1535,16 +1441,6 @@ class CPMReport(BasicAgent):
         state = self._init_state(query)
         self._current_survey = state["survey"]
 
-        # Oracle mode: skip initial search, generate outline from oracle aspects
-        if self._oracle_data is not None:
-            state = await self._init_plan_oracle(state, self._current_query_id)
-            if state["parsed"] and state["cursor"] != "outline":
-                state["state"] = "search"
-                state["step"] += 1
-            else:
-                self._print(f"  ⚠ Oracle init plan failed, aborting")
-                state["state"] = "done"
-
         _STAGE_LABELS = {
             "search":               "search",
             "analyst-init_plan":    "plan",
@@ -1636,8 +1532,7 @@ class CPMReport(BasicAgent):
                 rp_entry["docs"] = []
                 rp_entry["component_doc_ids"] = entry.get("input", {}).get("retrieved_doc_ids", [])
 
-            elif traj_state in ("analyst-init_plan", "analyst-init_plan_oracle",
-                                "analyst-extend_plan"):
+            elif traj_state in ("analyst-init_plan", "analyst-extend_plan"):
                 rp_entry["docs"] = []
                 rp_entry["component_doc_ids"] = entry.get("input", {}).get("retrieved_doc_ids", [])
 

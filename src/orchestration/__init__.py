@@ -203,7 +203,6 @@ def build_agent(
     max_extend_steps: int = 5,
     max_retries: int = 3,
     hard_mode: bool = True,
-    oracle_outline_path: Optional[str] = None,
     max_passage_chars: int = 4000,
 ):
     """Instantiate an agent and attach its search tool.
@@ -258,7 +257,6 @@ def build_agent(
         _reasoning_extra["max_extend_steps"] = max_extend_steps
         _reasoning_extra["max_retries"] = max_retries
         _reasoning_extra["hard_mode"] = hard_mode
-        _reasoning_extra["oracle_outline_path"] = oracle_outline_path
         _reasoning_extra["max_passage_chars"] = max_passage_chars
         _reasoning_extra["model_name"] = llm_model
 
@@ -449,7 +447,6 @@ def _init_worker(worker_id: int, worker_config: dict):
         max_extend_steps=worker_config.get("max_extend_steps", 5),
         max_retries=worker_config.get("max_retries", 3),
         hard_mode=worker_config.get("hard_mode", True),
-        oracle_outline_path=worker_config.get("oracle_outline_path"),
         max_passage_chars=worker_config.get("max_passage_chars", 4000),
     )
 

@@ -1,0 +1,66 @@
+# DRA agent training config (SFT + async GRPO).
+#
+# Mostly-fixed knobs live here; frequently-varied ones are CLI flags on
+# experiments/dra_train.py and are merged on top of this file.
+#
+# Defaults below are the CPU smoke-test configuration (all components = mock),
+# so `python experiments/dra_train.py --smoke` runs end-to-end with no GPUs.
+
+stage: rl                 # rl | sft
+verbose: true
+output_dir: null
+
+data:
+  source: synthetic       # synthetic (CPU) | dataset (indexing_corpus_dataset)
+  dataset: trqa           # used when source == dataset
+  dataset_year: null
+  subset: null
+  query_key: text
+  data_path: null
+  qrels_data_path: null
+  min_relevance_score: null
+  limit: null
+  num_synthetic: 8
+
+rollout:
+  policy: mock            # mock | server(SGLang/vLLM, TODO)
+  tool: mock              # mock | retrieval(searcher_component, TODO wiring)
+  server_url: null
+  model: null
+  max_turns: 5
+  max_gen_tokens: 512
+  temperature: 1.0
+  top_k_docs: 5
+  group_size: 4           # rollouts per prompt (GRPO group)
+  concurrency: 8
+
+reward:
+  outcome_metric: f1      # TODO(reward): define
+  lambda_process: 0.2     # keep outcome dominant (anti-hacking)
+  clamp_process: true
+  signals: [doc_novelty, marginal_recall]   # TODO(reward): controller signals to use
+
+buffer:
+  staleness_k: 1          # max weight-version lag (async)
+  capacity: 4096
+
+trainer:
+  backend: mock           # mock | grpo (AReaL/veRL adapter, TODO)
+  lr: 1.0e-6
+  kl_coef: 0.001
+  save_dir: null
+  save_every: 50
+  extra: {}
+
+sft:
+  backend: mock           # mock | llama_factory | trl | verl_fsdp (TODO)
+  data_out: null
+  base_model: null
+  epochs: 1
+  extra: {}
+
+rl:
+  mode: sync              # sync (validate first) | async (production)
+  total_steps: 4
+  prompts_per_step: 2
+  seed: 0

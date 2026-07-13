@@ -16,6 +16,7 @@ Related code now lives elsewhere:
 both imported directly by the callers that need them.
 """
 
+import gzip
 import json
 import pickle
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -159,13 +160,21 @@ def load_processed_results(processed: set, retrieval_dir, results: Dict[str, Any
     source = "local"
 
     # ── Try loading from pickle cache ────────────────────────────────────────
-    cache_filename = "_eval_cache_lightweight.pkl" if lightweight else "_eval_cache.pkl"
+    # gzip-compressed pickle of {query_id: reconstructed_result}.  Purely a
+    # speed cache for repeated/resumed eval runs — always rebuildable from the
+    # per-query files on disk (trajectory JSONL, generation MD, retrieval TRECs),
+    # so it is safe to delete.  gzip shrinks it ~7x (the surfaced-doc rankings
+    # dominate and compress well); level 6 is the fast default.
+    cache_filename = (
+        "_eval_results_cache_lightweight.pkl.gz" if lightweight
+        else "_eval_results_cache.pkl.gz"
+    )
     cache_path = Path(run_dir) / cache_filename
 
     to_load_set = set(to_load)
     try:
         if Path(cache_path).exists():
-            with open(cache_path, "rb") as f:
+            with gzip.open(cache_path, "rb") as f:
                 cached = pickle.load(f)
             if to_load_set <= set(cached.keys()):
                 for qid in to_load:
@@ -202,8 +211,8 @@ def load_processed_results(processed: set, retrieval_dir, results: Dict[str, Any
     if loaded_count > 0:
         try:
             loaded_results = {qid: results[qid] for qid in to_load if qid in results}
-            with open(cache_path, "wb") as f:
-                pickle.dump(loaded_results, f)
+            with gzip.open(cache_path, "wb", compresslevel=6) as f:
+                pickle.dump(loaded_results, f, protocol=pickle.HIGHEST_PROTOCOL)
             print(f"Saved eval cache ({loaded_count} queries)")
         except Exception as e:
             print(f"Warning: could not save eval cache: {e}")

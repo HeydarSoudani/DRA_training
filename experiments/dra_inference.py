@@ -300,7 +300,6 @@ def run_pipeline(data_path: str, subset: Optional[str] = None, dataset_year: Opt
             max_extend_steps=kwargs.get("max_extend_steps", 5),
             max_retries=kwargs.get("max_retries", 3),
             hard_mode=kwargs.get("hard_mode", True),
-            oracle_outline_path=kwargs.get("oracle_outline_path"),
             max_passage_chars=kwargs.get("max_passage_chars", 4000),
         )
 
@@ -586,6 +585,7 @@ def _parse_args():
     # ── Frequently-varied knobs (everything else lives in --config) ─────────
     parser.add_argument("--agentic-model", type=str, default="glm", choices=list(AGENTIC_MODEL_TO_LLM), help="Agent to run; the LLM is selected automatically from the agent. cpm_report = Writing-as-Reasoning (report generation); searchr1/research/stepsearch/react/selfask/searcho1 = Reasoning-augmented retrieval; glm/oss_20b/oss_120b/tongyi = vendor-specific ReAct agents.")
     parser.add_argument("--dataset", type=str, default="trqa", choices=["trqa", "browsecomp_plus", "neuclir"], help="Dataset. trqa/neuclir/browsecomp_plus use local indices.")
+    parser.add_argument("--subset", type=str, default="wiki1", help="Dataset subset/collection (null = auto-selected from --dataset). trqa: wiki1|wiki2|ecommerce; neuclir: news|technical|report; browsecomp_plus: test.")
     parser.add_argument("--retriever", type=str, default="qwen3_emb_4b", choices=["bm25", "spladepp", "spladev3", "rerank_l6", "rerank_l12", "contriever", "dpr", "e5", "bge", "qwen3_emb_0.6b", "qwen3_emb_4b", "qwen3_emb_8b", "agentir_4b"], help="Retriever type for public datasets (neuclir only)")
     parser.add_argument("--controller", type=str, default="off", choices=["off", "monitor", "action"], help="Controller mode. 'off': disabled. 'monitor': compute and log scores only, no intervention. 'action': controller takes corrective actions (intervene/stop) via the controller policy.")
     parser.add_argument("--controller-prompt-variant", type=str, default="nov_cov_sim", choices=["nov", "nov_cov", "nov_sim", "nov_cov_sim", "sim", "cov_sim"], help="Controller policy prompt variant controlling which signals the controller sees. 'nov': novelty only. 'nov_cov': novelty + criteria coverage. 'nov_sim': novelty + consec_query_sim + orig_query_sim. 'nov_cov_sim': novelty + criteria coverage + consec_query_sim + orig_query_sim. 'sim': consec_query_sim (primary) + orig_query_sim (guardrail). 'cov_sim': criteria coverage (primary) + consec_query_sim + orig_query_sim (no novelty). Default: 'nov_cov_sim'.")
@@ -599,9 +599,12 @@ def _parse_args():
     args, extras = parser.parse_known_args()
 
     # ── Merge file-backed config (+ any CLI overrides) onto args ────────────
+    cli_subset = args.subset
     config = load_run_config(args.config)
     overrides = parse_cli_overrides(extras)
     apply_config_to_args(args, config, overrides)
+    if cli_subset is not None:
+        args.subset = cli_subset
 
     # ── Derive --llm-model from --agentic-model ────────────────────────────-
     args.llm_model = AGENTIC_MODEL_TO_LLM[args.agentic_model]
@@ -633,20 +636,6 @@ def main():
             args.criteria_coverage_mode = "static"
         else:
             args.criteria_coverage_mode = "dynamic"
-
-    # ── Resolve --with-oracle-outline to an actual file path ─────────────
-    if args.with_oracle_outline:
-        _gold_root = Path(__file__).resolve().parent.parent / "gold_retriever_analysis" / "run_outputs"
-        _oracle_dataset_dir = f"{args.dataset}_{args.dataset_year}_{args.subset}_{args.retriever}"
-        _oracle_path = _gold_root / _oracle_dataset_dir / "gold_analysis_one_by_one" / "generation.json"
-        if _oracle_path.exists():
-            args.with_oracle_outline = str(_oracle_path)
-            print(f"Auto-resolved oracle outline: {args.with_oracle_outline}")
-        else:
-            print(f"WARNING: Oracle outline not found at {_oracle_path} — disabling oracle outline")
-            args.with_oracle_outline = None
-    else:
-        args.with_oracle_outline = None
 
     # ── Parse --gpu-ids and reconcile with --num-gpus ────────────────────
     gpu_ids = None

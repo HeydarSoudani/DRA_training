@@ -54,7 +54,6 @@ ensure_novel_seen_docs: false            # Filter docs seen in previous iteratio
 # ── Agent-specific ───────────────────────────────────────────────────────────
 use_plan: false                 # Enable planning in ReAct agent (only --agentic-model=react)
 max_extend_steps: 5             # Max outline extensions (cpm_report)
-with_oracle_outline: false      # Skip initial search; build outline from oracle aspects (cpm_report)
 hard_mode: true                 # Enforce strict validation rules (cpm_report)
 
 # ── Controller (the rest; --controller and --controller-prompt-variant are CLI) ─
