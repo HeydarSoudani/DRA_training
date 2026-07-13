@@ -59,6 +59,7 @@ Attribution (earliest-failing stage):
     else                                         -> reading / aggregation
 """
 
+import csv
 import json
 import logging
 import re
@@ -103,7 +104,16 @@ except Exception:  # pragma: no cover - keep the module importable standalone
         return (m.group(1) if m else generation).strip()
 
 
-STAGES = ("success", "planning", "retrieval", "reading_or_aggregation", "gold_incomplete")
+# Pipeline order: earliest-failing attribution assigns each query to one stage.
+# Shared by the stdout table (format_summary_table) and every figure below.
+STAGE_ORDER = ["success", "planning", "retrieval", "reading_or_aggregation", "gold_incomplete"]
+STAGE_LABELS = {
+    "success": "success",
+    "planning": "planning",
+    "retrieval": "retrieval",
+    "reading_or_aggregation": "reading/agg",
+    "gold_incomplete": "gold incompl.",
+}
 
 # aggregation string -> reducer kind over per-entity contribution values
 _REDUCE = {
@@ -132,20 +142,6 @@ def load_gold(path: str) -> Dict[str, dict]:
             rec = json.loads(line)
             gold[str(rec["qid"])] = rec  # duplicate ids: last wins (rows are identical)
     return gold
-
-
-def load_qrels(path: str) -> Dict[str, Set[str]]:
-    """Load TREC qrels (``qid 0 docid rel``) -> {qid: {docid}} for rel>0."""
-    qrels: Dict[str, Set[str]] = defaultdict(set)
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            parts = line.split()
-            if len(parts) != 4:
-                continue
-            qid, _, docid, rel = parts
-            if int(rel) > 0:
-                qrels[str(qid)].add(str(docid))
-    return dict(qrels)
 
 
 def load_trajectory(path: Path) -> Optional[dict]:
@@ -192,6 +188,48 @@ def load_corpus_subset(path: str, needed: Set[str]) -> Dict[str, str]:
                 if len(corpus) == len(needed):
                     break
     return corpus
+
+
+def load_inputs(args) -> tuple:
+    """Load gold, trajectories and (optionally) the retrieved-doc corpus + judge.
+
+    Consumes the resolved ``args`` (see :mod:`analysis.utils.config`) and returns
+    ``(gold, trajs, corpus, judge_client, n_missing_gold)`` ready for the
+    per-query attribution loop.
+    """
+    gold = load_gold(args.gold)
+    traj_dir = Path(args.run_dir) / "trajectory"
+    if not traj_dir.is_dir():
+        raise SystemExit(f"no trajectory/ under {args.run_dir}")
+
+    qids = args.qids or sorted(p.stem for p in traj_dir.glob("*.jsonl") if p.stem in gold)
+    if args.limit:
+        qids = qids[: args.limit]
+
+    # Load trajectories once (needed for the corpus-subset pass and analysis).
+    trajs: Dict[str, dict] = {}
+    n_missing_gold = 0
+    for qid in qids:
+        if qid not in gold:
+            n_missing_gold += 1
+            continue
+        t = load_trajectory(traj_dir / f"{qid}.jsonl")
+        if t is None:
+            logger.warning("no trajectory for %s", qid)
+            continue
+        trajs[qid] = t
+
+    corpus = None
+    if args.corpus:
+        needed = set().union(*(t["seen_docs"] for t in trajs.values())) if trajs else set()
+        corpus = load_corpus_subset(args.corpus, needed)
+        logger.info("loaded %d/%d retrieved docs from corpus", len(corpus), len(needed))
+    else:
+        logger.warning("no --corpus: per-entity retrieval (E_ret) will be left unassessed")
+
+    judge_client = get_judge_client(args.judge_model) if args.judge else None
+
+    return gold, trajs, corpus, judge_client, n_missing_gold
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +423,6 @@ def attribute(
     }
 
     secondary: List[str] = []
-    retrieval_subtype = None
     downstream_subtype = None
 
     if success:
@@ -414,7 +451,6 @@ def attribute(
     return {
         "primary_stage": primary,
         "secondary": secondary,
-        "retrieval_subtype": retrieval_subtype,
         "downstream_subtype": downstream_subtype,
         "gold_consistent": resolved["gold_consistent"],
         "aggregation": resolved["aggregation"],
@@ -596,6 +632,30 @@ def summarize(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def format_summary_table(summary: Dict[str, Any]) -> str:
+    """Render the summary as a compact text table (for stdout, not a file)."""
+    dist = summary.get("stage_distribution", {}) or {}
+    n = summary.get("num_queries", 0) or 1
+    stages = [s for s in STAGE_ORDER if s in dist]
+    stages += [s for s in dist if s not in STAGE_ORDER]  # any unexpected keys
+
+    lines = ["", f"reasoning-error attribution — {summary.get('num_queries', 0)} queries", "-" * 46]
+    lines.append(f"{'stage':<24}{'count':>8}{'pct':>10}")
+    for s in stages:
+        c = dist.get(s, 0)
+        lines.append(f"{s:<24}{c:>8}{100.0 * c / n:>9.1f}%")
+    lines.append("-" * 46)
+    lines.append(f"{'failed':<24}{summary.get('num_failed', 0):>8}")
+    lines.append(f"{'gold inconsistent (excl.)':<24}{summary.get('num_gold_inconsistent', 0):>8}")
+    mpr = summary.get("mean_plan_recall")
+    mrr = summary.get("mean_retrieval_recall")
+    if mpr is not None:
+        lines.append(f"{'mean plan recall':<24}{mpr:>8.3f}")
+    lines.append(f"{'mean retrieval recall':<24}" + ("n/a (no corpus)".rjust(8) if mrr is None else f"{mrr:>8.3f}"))
+    lines.append("")
+    return "\n".join(lines)
+
+
 def write_outputs(records: List[Dict[str, Any]], summary: Dict[str, Any], out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     per_q = out_dir / "reasoning_error_per_query.jsonl"
@@ -609,69 +669,216 @@ def write_outputs(records: List[Dict[str, Any]], summary: Dict[str, Any], out_di
     print(f"  wrote {out_dir / 'reasoning_error_summary.json'}")
 
 
-# ---------------------------------------------------------------------------
-# Self-test  (validates resolve/attribution on the fixed intermediate schema)
-# ---------------------------------------------------------------------------
+def load_records(jsonl_path: Path) -> tuple:
+    """Read a ``reasoning_error_per_query.jsonl`` back into ``(records, summary)``.
 
-def self_test() -> None:
-    rel, ab = 1e-3, 1e-6
-    gtab, gtrel = 0.5, 1e-2
+    The file's first line is the ``record == "meta"`` header (the summary); every
+    other line is one per-query record. This is the reader the plotter uses so
+    that plotting is a standalone step that depends only on the written file, not
+    on the run that produced it.
+    """
+    records: List[Dict[str, Any]] = []
+    summary: Dict[str, Any] = {}
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            if rec.get("record") == "meta":
+                summary = {k: v for k, v in rec.items() if k != "record"}
+                continue
+            records.append(rec)
+    return records, summary
 
-    def analyze(gold, question, think_text, retrieved_text, a_pred):
-        resolved = resolve_gold(gold, question, gtab, gtrel)
-        cov = compute_coverage(resolved, think_text, retrieved_text)
-        return resolved, attribute(resolved, cov, a_pred, rel, ab)
 
-    # --- COUNT: "how many ... located in Europe" over 4 states, answer 2 ---
-    count_gold = {
-        "qid": "q_count", "aggregation": "COUNT", "answer": 2,
-        "property": {"label": "continent"},
-        "entity_values": [
-            {"entity": "Alpha", "value": ["Europe"]},
-            {"entity": "Beta", "value": ["Asia"]},
-            {"entity": "Gamma", "value": ["Europe"]},
-            {"entity": "Delta", "value": ["North America"]},
-        ],
-    }
-    q = "How many states are located in Europe?"
-    allt = "Alpha Beta Gamma Delta"
+# ===========================================================================
+# Visualisation — plain matplotlib figures + tidy CSV, read from the jsonl
+# ===========================================================================
+# The plot step reads only a written ``reasoning_error_per_query.jsonl`` (via
+# ``load_records`` above), so it is decoupled from attribution: you can re-plot
+# without re-computing, or point it at any past run's file. Deliberately
+# un-styled — matplotlib defaults, no custom palette — for fast exploration, not
+# paper polish. Figures written to ``out_dir``:
+#     stage_distribution.png     counts per failure stage (the headline)
+#     stage_by_aggregation.png   stage mix per aggregation operator
+#     stage_by_complexity.png    stage mix per #gold-entities bin (hop count)
+#     coverage_scatter.png       plan-recall vs retrieval-recall (needs a corpus)
+#     reasoning_error_per_query.csv   tidy per-query rows (for cross-run later)
 
-    res, r = analyze(count_gold, q, allt, allt, 2)  # success
-    assert res["count_polarity"] == "positive" and res["gold_consistent"], res
-    assert r["primary_stage"] == "success", r
 
-    _, r = analyze(count_gold, q, "Alpha Beta Delta", allt, 1)  # never planned Gamma (Europe)
-    assert r["primary_stage"] == "planning", r
-    assert r["answer_match"]["a_plan"], r
+def _retrieval_assessed(records: List[Dict[str, Any]]) -> bool:
+    return any(r.get("retrieval_recall") is not None for r in records)
 
-    _, r = analyze(count_gold, q, allt, "Alpha Beta Delta", 1)  # Gamma planned, not retrieved
-    assert r["primary_stage"] == "retrieval", r
 
-    _, r = analyze(count_gold, q, allt, allt, 4)  # had all, returned entity count
-    assert r["primary_stage"] == "reading_or_aggregation", r
-    assert r["downstream_subtype"].startswith("aggregation_logic"), r
+def _present_stages(counts_by_row: Dict[str, Counter]) -> List[str]:
+    """Stages that actually occur, in pipeline order."""
+    return [s for s in STAGE_ORDER if any(c.get(s) for c in counts_by_row.values())]
 
-    _, r = analyze(count_gold, q, allt, None, 4)  # no corpus -> retrieval unassessed
-    assert r["primary_stage"] == "reading_or_aggregation", r
-    assert "retrieval_unassessed" in r["secondary"], r
 
-    # --- AVG over years, answer 1886 ---
-    avg_gold = {
-        "qid": "q_avg", "aggregation": "AVG", "answer": 1886,
-        "property": {"label": "date of birth"},
-        "entity_values": [{"entity": "Stalin", "value": 1878}, {"entity": "Khrushchev", "value": 1894}],
-    }
-    res, r = analyze(avg_gold, "avg birth year", "Stalin Khrushchev", "Stalin Khrushchev", 1886)
-    assert res["gold_consistent"] and r["primary_stage"] == "success", (res, r)
+def plot_stage_distribution(records: List[Dict[str, Any]], out: Path) -> Optional[Path]:
+    """Headline figure — counts per failure stage."""
+    import matplotlib.pyplot as plt
 
-    # --- gold_incomplete: entity_values cannot reach the answer ---
-    bad_gold = {
-        "qid": "q_bad", "aggregation": "SUM", "answer": 40501688,
-        "property": {"label": "population"},
-        "entity_values": [{"entity": "X", "value": 17494398}, {"entity": "Y", "value": 18676605}],
-    }
-    res, r = analyze(bad_gold, "sum pop", "X Y", "X Y", 999)
-    assert not res["gold_consistent"], res
-    assert r["primary_stage"] == "gold_incomplete", r
+    counts = Counter(r.get("primary_stage", "gold_incomplete") for r in records)
+    stages = [s for s in STAGE_ORDER if counts.get(s)]
+    if not stages:
+        return None
+    vals = [counts[s] for s in stages]
 
-    print("self-test: all assertions passed")
+    fig, ax = plt.subplots(figsize=(7, 4))
+    bars = ax.bar([STAGE_LABELS[s] for s in stages], vals)
+    ax.bar_label(bars, padding=2)
+    ax.set_ylabel("# queries")
+    ax.set_title(f"Failure stage distribution (n={len(records)})")
+    fig.tight_layout()
+    p = out / "stage_distribution.png"
+    fig.savefig(p, dpi=120)
+    plt.close(fig)
+    return p
+
+
+def _plot_stacked(counts_by_row: Dict[str, Counter], rows: List[str],
+                  title: str, xlabel: str, path: Path) -> Optional[Path]:
+    """Plain stacked bars (raw counts): one bar per row, stacked by stage."""
+    import matplotlib.pyplot as plt
+
+    stages = _present_stages(counts_by_row)
+    if not rows or not stages:
+        return None
+
+    fig, ax = plt.subplots(figsize=(7, 4.2))
+    bottom = [0] * len(rows)
+    for s in stages:
+        vals = [counts_by_row[r].get(s, 0) for r in rows]
+        ax.bar(rows, vals, bottom=bottom, label=STAGE_LABELS[s])
+        bottom = [b + v for b, v in zip(bottom, vals)]
+    ax.set_ylabel("# queries")
+    ax.set_xlabel(xlabel)
+    ax.set_title(title)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+    return path
+
+
+def _bin_entities(n: Optional[int]) -> str:
+    if not n:
+        return "?"
+    return "5+" if n >= 5 else str(n)
+
+
+def plot_stage_by_aggregation(records: List[Dict[str, Any]], out: Path) -> Optional[Path]:
+    by_agg: Dict[str, Counter] = defaultdict(Counter)
+    for r in records:
+        by_agg[str(r.get("aggregation", "?"))][r.get("primary_stage", "gold_incomplete")] += 1
+    rows = sorted(by_agg, key=lambda a: -sum(by_agg[a].values()))
+    return _plot_stacked(by_agg, rows, "Stage mix by aggregation operator",
+                         "aggregation", out / "stage_by_aggregation.png")
+
+
+def plot_stage_by_complexity(records: List[Dict[str, Any]], out: Path) -> Optional[Path]:
+    buckets: Dict[str, Counter] = defaultdict(Counter)
+    for r in records:
+        buckets[_bin_entities(r.get("n_gold_entities"))][r.get("primary_stage", "gold_incomplete")] += 1
+    rows = [b for b in ["2", "3", "4", "5+", "?"] if b in buckets]
+    return _plot_stacked(buckets, rows, "Stage mix by # gold entities (hop count)",
+                         "# gold entities", out / "stage_by_complexity.png")
+
+
+def plot_coverage_scatter(records: List[Dict[str, Any]], out: Path) -> Optional[Path]:
+    """plan-recall vs retrieval-recall scatter (only when a corpus was supplied)."""
+    if not _retrieval_assessed(records):
+        return None
+    import matplotlib.pyplot as plt
+
+    by_stage: Dict[str, list] = defaultdict(list)
+    for r in records:
+        x, y = r.get("plan_recall"), r.get("retrieval_recall")
+        if x is None or y is None:
+            continue
+        by_stage[r.get("primary_stage", "gold_incomplete")].append((x, y))
+    if not by_stage:
+        return None
+
+    fig, ax = plt.subplots(figsize=(5.5, 5.5))
+    for s in STAGE_ORDER:
+        pts = by_stage.get(s)
+        if not pts:
+            continue
+        xs, ys = zip(*pts)
+        ax.scatter(xs, ys, s=30, alpha=0.6, label=STAGE_LABELS[s])
+    ax.plot([0, 1], [0, 1], "--", color="gray", linewidth=1)
+    ax.set_xlim(-0.05, 1.05)
+    ax.set_ylim(-0.05, 1.05)
+    ax.set_xlabel("plan recall (entities enumerated / gold)")
+    ax.set_ylabel("retrieval recall (entities surfaced / gold)")
+    ax.set_title("Where is entity coverage lost?")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    p = out / "coverage_scatter.png"
+    fig.savefig(p, dpi=120)
+    plt.close(fig)
+    return p
+
+
+_CSV_FIELDS = [
+    "qid", "primary_stage", "aggregation", "downstream_subtype", "gold_consistent",
+    "n_gold_entities", "n_planned", "n_retrieved", "plan_recall", "retrieval_recall",
+    "num_steps", "a_pred", "answer",
+]
+
+
+def export_csv(records: List[Dict[str, Any]], out: Path,
+               run_key: Optional[Dict[str, str]] = None) -> Path:
+    """Tidy per-query rows for cross-run stacking (optionally keyed by the run)."""
+    run_key = run_key or {}
+    key_fields = list(run_key)
+    p = out / "reasoning_error_per_query.csv"
+    with open(p, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(key_fields + _CSV_FIELDS)
+        for r in records:
+            w.writerow([run_key[k] for k in key_fields] + [r.get(k) for k in _CSV_FIELDS])
+    return p
+
+
+def render_all(jsonl_path: Path, out_dir: Path,
+               run_key: Optional[Dict[str, str]] = None) -> None:
+    """Read ``reasoning_error_per_query.jsonl`` and render CSV + plain PNGs.
+
+    The file is the only input, so plotting is decoupled from attribution.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    records, _summary = load_records(Path(jsonl_path))
+    if not records:
+        logger.warning("[viz] no records in %s", jsonl_path)
+        return
+
+    # CSV first — it never depends on matplotlib being importable.
+    written = [export_csv(records, out_dir, run_key)]
+
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+    except Exception as e:  # pragma: no cover
+        logger.warning("[viz] matplotlib unavailable (%s) — wrote CSV only", e)
+        for p in written:
+            logger.info("[viz] wrote %s", p)
+        return
+
+    for fn in (plot_stage_distribution,
+               plot_stage_by_aggregation,
+               plot_stage_by_complexity,
+               plot_coverage_scatter):
+        try:
+            p = fn(records, out_dir)
+            if p:
+                written.append(p)
+        except Exception as e:  # one bad figure must not sink the run
+            logger.warning("[viz] figure %s failed: %s", fn.__name__, e)
+
+    for p in written:
+        logger.info("[viz] wrote %s", p)
