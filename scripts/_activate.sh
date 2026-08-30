@@ -55,6 +55,6 @@ export PYTHONUNBUFFERED=1
 export HF_HOME=/projects/0/prjs0834/heydars/.cache/huggingface
 export HF_DATASETS_CACHE=/projects/0/prjs0834/heydars/.cache/huggingface
 export DRA_DATA_ROOT=/projects/0/prjs0834/heydars/DRA_training/data
-export DRA_OUTPUT_ROOT=/home/hsoudani/DRA_training/run_outputs
+export DRA_OUTPUT_ROOT="${_DRA_REPO_ROOT}/run_outputs"
 
 echo "[_activate] ready: $(command -v python) ($(python --version 2>&1))"

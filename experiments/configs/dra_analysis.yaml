@@ -1,10 +1,10 @@
 # ============================================================================
 # Default run configuration for analysis/reasoning_error_analysis.py
 # ============================================================================
-# Holds the mostly-fixed variables for the reasoning-error attribution.
+# Holds the mostly-fixed variables for the reasoning-error analysis.
 # The frequently-varied knobs stay on the CLI and are NOT listed here:
 #   --agentic-model  --dataset  --retriever  --controller
-#   --controller-prompt-variant  --limit  --qids  --judge
+#   --controller-prompt-variant  --limit  --qids
 #
 # Precedence (lowest -> highest):
 #   built-in fallback  <  this file  <  explicit CLI flag
@@ -16,12 +16,12 @@
 # ============================================================================
 
 # ── Dataset (null = auto-selected from --dataset) ────────────────────────────
-subset: wiki2                   # trqa: wiki1 | wiki2 (picks the gold/corpus split)
+subset: wiki2                   # trqa: wiki1 | wiki2 (picks the gold split)
 dataset_year: null              # trqa eval split; null -> "test"
 query_key: null                 # JSONL key for query text; null -> "text"
 
 # ── Roots (null = built-in defaults) ─────────────────────────────────────────
-data_root: null                 # holds <dataset>/queries and <dataset>/corpus; null -> _IR_ROOT
+data_root: null                 # holds <dataset>/queries and <dataset>/qrels; null -> _IR_ROOT
 output: null                    # run_outputs root; null -> $DRA_OUTPUT_ROOT
 
 # ── Run-dir derivation (must match how the run was produced) ─────────────────
@@ -32,15 +32,11 @@ llm_controller: "claude-sonnet-4-6"  # controller LLM (only in the dir name when
 # ── Explicit path overrides (null = derive from the knobs above) ─────────────
 run_dir: null                   # run_outputs/<dataset_dir>/<run_name>/<ctrl>
 gold: null                      # …/trqa/queries/queries_<split>_intermediate_info.jsonl
-corpus: null                    # …/trqa/corpus/<corpus>.jsonl (enables E_ret)
-qrels: null                     # optional TREC qrels (reserved; currently unused)
+queries: null                   # …/trqa/queries/queries_<split>.jsonl (question text)
+qrels: null                     # …/trqa/qrels/qrels_<split>.txt (gold docs D*)
+page_titles: null               # …/trqa/qrels/page_titles.json (pageid -> title cache)
 out: null                       # analysis artifacts dir; null -> <run_dir>/analysis
 
-# ── Numeric-matching tolerances ──────────────────────────────────────────────
-rel_tol: 0.001                  # relative tol when matching agent answer vs targets
-abs_tol: 0.000001               # absolute tol (dominates near zero)
-gold_tol_abs: 0.5               # abs tol for the gold-consistency check (a_star vs answer)
-gold_tol_rel: 0.01              # rel tol for the gold-consistency check
-
-# ── LLM judge (only used with --judge) ───────────────────────────────────────
-judge_model: "openrouter/qwen/qwen3-32b"  # gated planning/aggregation judges (OpenRouter)
+# ── Matching tolerances ──────────────────────────────────────────────────────
+agg_tol_pct: 1.0                # % tolerance for f(V) vs answer (gold_ok / agg_ok)
+value_tol_rel: 0.005            # relative tolerance when finding a Quantity value in the text

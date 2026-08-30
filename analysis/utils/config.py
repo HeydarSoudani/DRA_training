@@ -5,11 +5,11 @@ the CLI (``--agentic-model``, ``--dataset``, ``--retriever``, ``--controller``,
 ``--controller-prompt-variant``), while the mostly-fixed variables live in a YAML
 file (``experiments/configs/dra_analysis.yaml``) and are merged onto ``args``.
 
-Crucially, the run directory, the gold intermediate-info file and the corpus are
-then **derived** from those knobs exactly the way the inference pipeline lays
-them out, so you never hand-type a run path. Any derived value can still be
-overridden by putting an explicit path in the YAML or passing the matching
-``--flag`` on the CLI.
+Crucially, the run directory and every gold-side input (intermediate info,
+queries, qrels, page titles) are then **derived** from those knobs exactly the way
+the inference pipeline lays them out, so you never hand-type a run path. Any
+derived value can still be overridden by putting an explicit path in the YAML or
+passing the matching ``--flag`` on the CLI.
 
 Precedence (lowest -> highest):  built-in fallback  <  YAML file  <  CLI flag.
 """
@@ -25,7 +25,6 @@ from utils.cli_setup import parse_cli_overrides, _coerce_scalar
 from utils.config import _IR_ROOT, AGENTIC_MODEL_TO_LLM, AGENTIC_MODEL_ALIAS
 from utils.io_utils import build_run_name_for_pipeline, build_controller_config_name
 from indexing_corpus_dataset.dataset_loaders import resolve_split_id
-from indexing_corpus_dataset.layout import trqa_corpus_name
 
 logger = logging.getLogger("reasoning_error_analysis")
 
@@ -57,16 +56,13 @@ FILE_BACKED_DEFAULTS = {
     # Explicit path overrides (null -> derive from the knobs above)
     "run_dir": None,
     "gold": None,
-    "corpus": None,
+    "queries": None,
     "qrels": None,
+    "page_titles": None,
     "out": None,
-    # Numeric-matching tolerances
-    "rel_tol": 1e-3,
-    "abs_tol": 1e-6,
-    "gold_tol_abs": 0.5,
-    "gold_tol_rel": 1e-2,
-    # LLM judge (only used with --judge)
-    "judge_model": "openrouter/qwen/qwen3-32b",
+    # Matching tolerances
+    "agg_tol_pct": 1.0,
+    "value_tol_rel": 5e-3,
 }
 
 
@@ -113,7 +109,7 @@ def apply_config_to_args(args, config: dict, overrides: dict) -> None:
 
 
 def resolve_paths(args) -> None:
-    """Derive run_dir / gold / corpus / out from the CLI knobs (TRQA layout).
+    """Derive run_dir and the gold-side paths from the CLI knobs (TRQA layout).
 
     Reproduces the directory names the inference pipeline builds:
         {output}/{dataset}_{split}_{retriever}/{agent}_{backend}_{model}/{ctrl}/
@@ -157,18 +153,22 @@ def resolve_paths(args) -> None:
     if args.run_dir is None:
         args.run_dir = str(Path(output_root) / dataset_dir / run_name / controller_config_name)
         print(f"Auto-derived run dir: {args.run_dir}")
+    queries_dir = data_root / "trqa" / "queries"
+    qrels_dir = data_root / "trqa" / "qrels"
     if args.gold is None:
-        args.gold = str(
-            data_root / "trqa" / "queries" / f"queries_{file_data_set}_intermediate_info.jsonl"
-        )
+        args.gold = str(queries_dir / f"queries_{file_data_set}_intermediate_info.jsonl")
         print(f"Auto-derived gold: {args.gold}")
-    if args.corpus is None:
-        cand = data_root / "trqa" / "corpus" / f"{trqa_corpus_name(args.subset)}.jsonl"
-        if cand.exists():
-            args.corpus = str(cand)
-            print(f"Auto-derived corpus: {args.corpus}")
-        else:
-            print(f"WARNING: corpus not found at {cand} — per-entity retrieval (E_ret) unassessed")
+    if args.queries is None:
+        args.queries = str(queries_dir / f"queries_{file_data_set}.jsonl")
+        print(f"Auto-derived queries: {args.queries}")
+    if args.qrels is None:
+        args.qrels = str(qrels_dir / f"qrels_{file_data_set}.txt")
+        print(f"Auto-derived qrels: {args.qrels}")
+    if args.page_titles is None:
+        # pageid -> title, built once by a single pass over the corpus; splits the
+        # query-level qrels into per-entity gold docs (see load_gold).
+        args.page_titles = str(qrels_dir / "page_titles.json")
+        print(f"Auto-derived page titles: {args.page_titles}")
     if args.out is None:
         args.out = str(Path(args.run_dir) / "analysis")
         print(f"Auto-derived out: {args.out}")
